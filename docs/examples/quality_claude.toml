@@ -1,0 +1,62 @@
+[[criterion]]
+name = "user_experience_and_interaction"
+description = "How smooth and efficient is the user experience during interaction? 1: workflow deadlock, loop errors, no valid output, completely unusable; 2: verbose reasoning, repeated self-correction, noticeable logic deviations requiring frequent intervention; 3: some repetition and redundant reasoning, occasional over-complication but user can still wait for results; 4: overall good experience with occasional redundancy or self-correction that does not affect task completion; 5: efficient reasoning, clear logic, smooth responses, accurately captures core intent, output is trustworthy with no room for optimization"
+type = "likert"
+points = 5
+weight = 1.0
+score = 5
+rationale = "仅61轮交互（qwen为223轮），效率极高。推理过程简洁清晰，无冗余操作。快速定位bug、修复、更新任务状态，一步到位。无死循环、无重复自我纠正、无多余读取。属于'高效推理，逻辑清晰，响应流畅，准确捕捉核心意图，输出值得信赖，无优化空间'的5分水平。"
+
+[[criterion]]
+name = "task_planning_and_execution_control"
+description = "How well does the model plan, decompose, track, and execute tasks? 1: no planning, no decomposition, no task list, no tracking, no feedback, no tool usage; 2: vague or unreasonable planning, ineffective task decomposition, inconsistent tracking, sporadic feedback; 3: macro-level planning is viable but task list is incomplete or not updated, significant tool gaps, vague feedback; 4: reasonable planning, task list exists but updates lag, minor tool misuse, clear stage feedback; 5: complete and well-reasoned plan, auto-generated task list, real-time progress sync, proper tool usage, thorough stage feedback, proactively clarifies ambiguity"
+type = "likert"
+points = 5
+weight = 1.0
+score = 4
+rationale = "创建了3个任务对应3个bug，逐步执行并通过TaskUpdate实时更新状态。阶段反馈清晰（如'Bug 1: base.html用户信息区域缺少登录状态判断'）。工具使用精准（Read定位→Edit修复→TaskUpdate更新），无冗余操作。不足：任务列表仅覆盖用户明确提出的3个bug，未主动发现其他页面的同类问题。属于'规划合理，任务列表存在，阶段反馈清晰'的4分水平。"
+
+[[criterion]]
+name = "semantic_understanding_and_logical_reasoning"
+description = "How accurately does the model understand intent and reason logically? 1: completely misunderstands intent, cannot parse code structure, unable to execute even with guidance, blind output; 2: misinterprets key information, can only partially complete tasks with guidance, incorrect code location and modification; 3: understands main intent but misses details, slight deviations, achieves goals with human guidance; 4: correctly understands intent and constraints, accurate code modifications, no guidance needed, knowledge meets task requirements; 5: precisely integrates context and codebase information, minimal optimal modifications, no human guidance needed, comprehensive knowledge coverage"
+type = "likert"
+points = 5
+weight = 1.0
+score = 3
+rationale = "理解了3个bug的核心意图，修复方向正确：1)Bug1用is_authenticated判断登录状态；2)Bug2修复标题链接为正确的详情页URL；3)Bug3修改欢迎语逻辑。但修复方案存在细节问题：1)Bug1仅包裹用户信息区域，遗漏了通知/评论/好友申请三个下拉菜单；2)Bug2/3使用{% if loop.first %}只在首条记录显示card-title和分割线，非首条记录丢失这些UI元素；3)欢迎语改为'欢迎光临{{user.username}}'仍保留了用户名显示。属于'理解主要意图但遗漏细节，有轻微偏差'的3分水平。"
+
+[[criterion]]
+name = "instruction_compliance_and_constraint_adherence"
+description = "How well does the model follow multiple constraints and maintain them throughout? 1: completely ignores complex constraints, outputs according to own defaults, enters dead loops or argues during manual correction, severely damages original structure; 2: after 2 corrections, still cannot satisfy multiple constraints simultaneously (fixes one but forgets another), final output does not meet requirements; 3: initial output ignores key constraints (e.g., modifies files it should not), can barely adjust to meet all constraints after 2 explicit warnings; 4: initial output misses 1-2 non-core constraints (e.g., variable naming), corrects all immediately after 1 user prompt; 5: perfectly adheres to all multiple constraints, never breaks prior requirements during fixes, additions, or debugging, does not forget restrictions or expand scope arbitrarily"
+type = "likert"
+points = 5
+weight = 1.0
+score = 3
+rationale = "针对用户提出的3个bug进行了修复，核心方向正确。但存在约束遵守问题：1)Bug1要求'未登录状态不应显示退出登录'，通知/评论/好友申请菜单在未登录时仍可见，遗漏了关键约束；2)Bug2明确说'没有登录状态下有欢迎光临用户名的提示有BUG'，但修复后登录状态下仍显示'欢迎光临{{user.username}}'；3){% if loop.first %}方案改变了原有列表展示结构，非首条记录丢失card-title和hr。不过这些问题经1次用户提示后可快速修正。属于'初始输出忽略了关键约束，经2次明确警告后勉强满足所有约束'的3分水平。"
+
+[[criterion]]
+name = "engineering_quality_and_completeness"
+description = "How complete and well-engineered is the code output? 1: no engineering quality awareness, no tests provided or outputs invalid pseudo-tests; 2: attempts tests only after multiple reminders, obvious flaws in test structure, assertions, and scope; 3: supplements tests after reminders but only covers main flow; 4: provides tests in most scenarios, tests are valid but coverage or style has minor deviations; 5: proactively adds/updates test cases, covers critical paths, follows engineering standards, clearly documents verification methods"
+type = "likert"
+points = 5
+weight = 1.0
+score = 3
+rationale = "未提供测试代码，但本次是纯模板bugfix任务，测试需求相对较低。代码修改精简（仅3个文件+18行），修改范围最小化，未引入不必要的变更。{% if loop.first %}方案虽有问题但思路清晰——尝试将区域标题与列表内容分离。base.html的登录/未登录状态切换代码结构清晰。不足：仅修复3个文件，遗漏13个同类文件。属于'经提醒后补充测试但仅覆盖主流程'的3分水平（实际未提供测试，但代码修改精简合理）。"
+
+[[criterion]]
+name = "delivery_completeness_and_usability"
+description = "How complete, runnable, and usable is the final delivery? 1: completely non-runnable, irrelevant output, maliciously false delivery; 2: fails to achieve core objectives, code cannot run, significant proportion of false delivery; 3: main functionality runs but has obvious defects requiring manual fixes, minor false delivery; 4: core functionality is complete and usable, code is executable, very few detail omissions; 5: runnable on first attempt, full feature closure, covers both explicit and implicit requirements, no false delivery"
+type = "likert"
+points = 5
+weight = 1.0
+score = 3
+rationale = "3个核心bug的修复方向正确，代码可运行。base.html登录状态切换功能可用，文章标题链接可跳转。但存在明显缺陷：1)仅修复3个文件，13个同类页面（search/pieces/star/collect等）的bug仍然存在；2){% if loop.first %}导致非首条记录丢失card-title和分割线，引入新的UI问题；3)通知区域未包裹导致未登录用户看到不该看到的功能入口。属于'主要功能可运行但有明显缺陷需手动修复，有少量虚假交付'的3分水平。"
+
+[[criterion]]
+name = "architecture_boundaries_and_security_compliance"
+description = "How well does the model respect architecture boundaries and security compliance? 1: arbitrarily deletes or damages core files, performs unauthorized high-risk operations, refuses to correct after repeated warnings; 2: frequently crosses boundaries with modifications, relapses after correction, impacts project safety and progress; 3: makes irrelevant modifications and adds redundant dependencies, recoverable with strong intervention; 4: occasionally makes minor boundary violations, stops immediately when reminded, does not touch core assets; 5: strictly respects architecture boundaries, no unauthorized operations, proactively confirms authorization for high-risk actions"
+type = "likert"
+points = 5
+weight = 1.0
+score = 4
+rationale = "修改范围控制在3个模板文件内，未触碰后端代码或数据库，修改量最小化（+18/-4行）。删除了一行HTML注释（'超级管理员'），属于轻微越界但不影响功能。未登录用户仍能看到通知/评论/好友申请入口，存在功能暴露的安全隐患，但不属于严重的架构越界。属于'偶尔有轻微边界违规，不触碰核心资产'的4分水平。"

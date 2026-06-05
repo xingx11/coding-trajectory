@@ -1,0 +1,51 @@
+# Environment files
+.env
+.env.*
+!.env.template
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build and coverage artifacts
+dist/
+build/
+htmlcov/
+.coverage
+.coverage.*
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# IDE and editor files
+.idea/
+.vscode/
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local tool caches
+.claude/
+
+# Delivery batches (contain trajectory data and scores)
+delivery_*/
+
+# Generated rubric templates (created by `ctpipe gen`)
+rubrics_templates/qwen/CT-*.toml
+rubrics_templates/claude/CT-*.toml

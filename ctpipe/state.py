@@ -1,0 +1,73 @@
+"""Pipeline state tracking via JSON ledger.
+
+Stored at delivery_YYYYMMDD/pipeline_state.json.
+Supports idempotent re-runs: each subcommand skips completed tasks.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+class PipelineState:
+    def __init__(self, path: Path):
+        self._path = path
+        self._data: dict[str, dict[str, Any]] = {}
+        if path.exists():
+            try:
+                self._data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                self._data = {}
+
+    def save(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self._path)
+
+    def _task(self, task_id: str) -> dict[str, Any]:
+        if task_id not in self._data:
+            self._data[task_id] = {}
+        return self._data[task_id]
+
+    def get(self, task_id: str, stage: str, model: str | None = None) -> dict[str, Any]:
+        task = self._task(task_id)
+        stage_data = task.get(stage, {})
+        if model:
+            return stage_data.get(model, {})
+        return stage_data
+
+    def set(self, task_id: str, stage: str, model: str | None = None, **data: Any) -> None:
+        task = self._task(task_id)
+        if model:
+            if stage not in task:
+                task[stage] = {}
+            task[stage][model] = {**task[stage].get(model, {}), **data}
+        else:
+            task[stage] = {**task.get(stage, {}), **data}
+        self.save()
+
+    def is_done(self, task_id: str, stage: str, model: str | None = None) -> bool:
+        info = self.get(task_id, stage, model)
+        return info.get("status") == "done"
+
+    def reset(self, task_id: str, stage: str, model: str | None = None) -> bool:
+        task = self._data.get(task_id)
+        if not task or stage not in task:
+            return False
+        if model:
+            stage_data = task[stage]
+            if isinstance(stage_data, dict) and model in stage_data:
+                del stage_data[model]
+                self.save()
+                return True
+            return False
+        del task[stage]
+        self.save()
+        return True
+
+    @property
+    def all_task_ids(self) -> list[str]:
+        return [k for k in self._data.keys() if not k.startswith("_")]
