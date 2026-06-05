@@ -453,4 +453,5 @@ passrate = sum(score_i × weight_i) / sum(points_i × weight_i)
 ## 相关文档
 
 - [CLAUDE.md](./CLAUDE.md) — Claude Code 的项目指令
+- [docs/前置.md](./docs/前置.md) — 面向低基础用户的数据提取新手教程
 - [rubrics_templates/README.md](./rubrics_templates/README.md) — 评分模板说明
