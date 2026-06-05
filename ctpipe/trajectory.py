@@ -63,27 +63,30 @@ def find_delivery_trajectory(
 
 def parse_trajectory(jsonl_path: Path) -> TrajectoryInfo:
     info = TrajectoryInfo(file_path=jsonl_path)
-    for raw in jsonl_path.open("r", encoding="utf-8", errors="replace"):
-        raw = raw.strip()
-        if not raw:
-            continue
-        info.line_count += 1
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("sessionId"):
-            info.session_id = obj["sessionId"]
-        if obj.get("cwd"):
-            info.cwd_values.add(obj["cwd"])
-        ts = obj.get("timestamp")
-        if ts:
-            info.last_ts = ts
-            if info.first_user_ts is None and obj.get("type") == "user":
-                info.first_user_ts = ts
-        msg = obj.get("message")
-        if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("model"):
-            info.models.add(msg["model"])
+    with jsonl_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            info.line_count += 1
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("sessionId"):
+                info.session_id = obj["sessionId"]
+            if obj.get("cwd"):
+                info.cwd_values.add(obj["cwd"])
+            ts = obj.get("timestamp")
+            if ts:
+                info.last_ts = ts
+                if info.first_user_ts is None and obj.get("type") == "user":
+                    info.first_user_ts = ts
+            msg = obj.get("message")
+            if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("model"):
+                info.models.add(msg["model"])
     return info
 
 
@@ -104,28 +107,36 @@ def find_trajectory_for_run(
     if not proj_dir.is_dir():
         return None
 
-    candidates: list[Path] = []
+    candidates: list[tuple[Path, float]] = []
     for f in proj_dir.iterdir():
-        if f.suffix == ".jsonl" and f.stat().st_mtime > start_time:
-            candidates.append(f)
+        if f.suffix == ".jsonl":
+            mtime = f.stat().st_mtime
+            if mtime > start_time:
+                candidates.append((f, mtime))
 
     if not candidates:
         return None
 
     if expected_session_id:
-        for f in candidates:
+        for f, _ in candidates:
             with f.open("r", encoding="utf-8", errors="replace") as fh:
-                first_line = fh.readline()
-            if first_line.strip():
-                try:
-                    obj = json.loads(first_line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("sessionId") == expected_session_id:
-                    return f
+                for line_num, line in enumerate(fh):
+                    if line_num >= 50:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    if obj.get("sessionId") == expected_session_id:
+                        return f
 
-    candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-    return candidates[0]
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    return candidates[0][0]
 
 
 def extract_for_scoring(jsonl_path: Path, max_chars: int = 100_000) -> str:
@@ -137,60 +148,79 @@ def extract_for_scoring(jsonl_path: Path, max_chars: int = 100_000) -> str:
     parts: list[str] = []
     total = 0
 
-    for raw in jsonl_path.open("r", encoding="utf-8", errors="replace"):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            obj = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        msg = obj.get("message")
-        if not isinstance(msg, dict):
-            continue
+    with jsonl_path.open("r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            msg = obj.get("message")
+            if not isinstance(msg, dict):
+                continue
 
-        role = msg.get("role", "")
-        content = msg.get("content")
-        if not content:
-            continue
+            role = msg.get("role", "")
+            content = msg.get("content")
+            if not content:
+                continue
 
-        if role == "user":
-            text = _extract_text(content)
-            if text:
-                chunk = f"\n=== USER ===\n{text}\n"
-                parts.append(chunk)
-                total += len(chunk)
+            if role == "user":
+                text = _extract_text(content)
+                if text:
+                    chunk = f"\n=== USER ===\n{text}\n"
+                    parts.append(chunk)
+                    total += len(chunk)
 
-        elif role == "assistant":
-            text_parts: list[str] = []
-            if isinstance(content, str):
-                text_parts.append(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                        elif block.get("type") == "tool_use":
-                            name = block.get("name", "?")
-                            inp = block.get("input", {})
-                            inp_str = json.dumps(inp, ensure_ascii=False)
-                            if len(inp_str) > 500:
-                                inp_str = inp_str[:500] + "..."
-                            text_parts.append(f"[Tool: {name}({inp_str})]")
-                        elif block.get("type") == "tool_result":
-                            result_content = block.get("content", "")
-                            if isinstance(result_content, str):
-                                if len(result_content) > 500:
-                                    result_content = result_content[:500] + "..."
-                                text_parts.append(f"[Result: {result_content}]")
-            if text_parts:
-                combined = "\n".join(text_parts)
-                chunk = f"\n=== ASSISTANT ===\n{combined}\n"
-                parts.append(chunk)
-                total += len(chunk)
+            elif role == "assistant":
+                text_parts: list[str] = []
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                            elif block.get("type") == "tool_use":
+                                name = block.get("name", "?")
+                                inp = block.get("input", {})
+                                summary_parts = []
+                                for k, v in (inp.items() if isinstance(inp, dict) else []):
+                                    sv = str(v)
+                                    if len(sv) > 80:
+                                        sv = sv[:40] + "..."
+                                    summary_parts.append(f"{k}={sv}")
+                                    if len(summary_parts) >= 3:
+                                        break
+                                inp_summary = ", ".join(summary_parts) or "..."
+                                text_parts.append(f"[Tool: {name}({inp_summary})]")
+                            elif block.get("type") == "tool_result":
+                                is_error = block.get("is_error", False)
+                                result_content = block.get("content", "")
+                                if isinstance(result_content, list):
+                                    result_content = " ".join(
+                                        b.get("text", "") for b in result_content
+                                        if isinstance(b, dict) and b.get("type") == "text"
+                                    )
+                                result_content = str(result_content).strip()
+                                if is_error:
+                                    snippet = result_content[:300] if result_content else ""
+                                    text_parts.append(f"[Result: ERROR] {snippet}".rstrip())
+                                elif result_content:
+                                    text_parts.append(f"[Result: {result_content[:300]}]")
+                                else:
+                                    text_parts.append("[Result: ok]")
+                if text_parts:
+                    combined = "\n".join(text_parts)
+                    chunk = f"\n=== ASSISTANT ===\n{combined}\n"
+                    parts.append(chunk)
+                    total += len(chunk)
 
-        if total > max_chars:
-            break
+            if total > max_chars:
+                break
 
     result = "".join(parts)
     if len(result) > max_chars:

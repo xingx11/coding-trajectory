@@ -6,7 +6,7 @@ import asyncio
 import tomllib
 
 from ctpipe import strip_claude_wrapper
-from ctpipe.config import BatchConfig, TaskConfig, build_claude_env, select_tasks
+from ctpipe.config import BatchConfig, TaskConfig, build_claude_env, select_delivery_tasks
 from ctpipe.state import PipelineState
 from ctpipe.toml_utils import Criterion, calc_passrate, read_quality_toml, write_quality_toml
 from ctpipe.trajectory import extract_for_scoring
@@ -119,7 +119,7 @@ def _parse_scored_toml(raw: str, template_criteria: list[Criterion]) -> list[Cri
 def _build_scoring_env(config: BatchConfig) -> dict[str, str]:
     if not config.claude.auth_token or not config.claude.base_url or not config.claude.model:
         raise ValueError("Claude scoring config is incomplete in .env (need auth token, base URL, and model)")
-    return build_claude_env(config.claude, http_proxy=config.http_proxy)
+    return build_claude_env(config.claude)
 
 
 async def score_single(
@@ -127,6 +127,7 @@ async def score_single(
     model_name: str,
     config: BatchConfig,
     state: PipelineState,
+    env: dict[str, str],
 ) -> bool:
     collect_info = state.get(task.id, "collect", model_name)
     if collect_info.get("status") != "done":
@@ -137,6 +138,7 @@ async def score_single(
     jsonl_path = config.delivery_dir / jsonl_rel
     if not jsonl_path.exists():
         print(f"  [{task.id}/{model_name}] ERROR: JSONL not found: {jsonl_path}")
+        state.set(task.id, "score", model=model_name, status="failed", error="JSONL not found")
         return False
 
     template_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
@@ -144,6 +146,7 @@ async def score_single(
         template_path = config.rubrics_dir / model_name / f"{task.id}.quality.toml"
     if not template_path.exists():
         print(f"  [{task.id}/{model_name}] ERROR: scoring template not found")
+        state.set(task.id, "score", model=model_name, status="failed", error="template not found")
         return False
 
     template_criteria = read_quality_toml(template_path)
@@ -154,7 +157,6 @@ async def score_single(
     print(f"  [{task.id}/{model_name}] Trajectory: {len(trajectory_text)} chars")
 
     print(f"  [{task.id}/{model_name}] Calling AI for scoring...")
-    env = _build_scoring_env(config)
     raw_output = await _call_scoring_ai(trajectory_text, template_text, env, model=config.claude.model)
 
     if not raw_output:
@@ -186,14 +188,15 @@ async def score_all(
 ) -> None:
     state = PipelineState(config.delivery_dir / "pipeline_state.json")
     models = models or ["qwen", "claude"]
-    tasks = select_tasks(config.tasks, task_ids)
+    tasks = select_delivery_tasks(config, task_ids)
     sem = asyncio.Semaphore(config.max_parallel)
 
     async def bounded(task: TaskConfig, model_name: str) -> None:
         async with sem:
-            await score_single(task, model_name, config, state)
+            await score_single(task, model_name, config, state, env)
 
     coros = []
+    task_models: list[tuple[str, str]] = []
     for task in tasks:
         for model_name in models:
             if state.is_done(task.id, "score", model_name):
@@ -201,7 +204,14 @@ async def score_all(
                 continue
             print(f"[{task.id}/{model_name}] Scoring trajectory...")
             coros.append(bounded(task, model_name))
+            task_models.append((task.id, model_name))
 
     if coros:
-        await asyncio.gather(*coros, return_exceptions=True)
+        env = _build_scoring_env(config)
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for task_model, result in zip(task_models, results):
+            if isinstance(result, Exception):
+                task_id, model_name = task_model
+                print(f"[{task_id}/{model_name}] ERROR: {result}")
+                state.set(task_id, "score", model=model_name, status="failed", error=str(result))
     print("Score complete.")

@@ -285,3 +285,38 @@ def sample_slots(
         remaining.remove(chosen)
 
     return result
+
+
+def expand_slot_for_batch(
+    slot: TaskSlot,
+    batch_size: int,
+    exclude_indices: set[int] | None = None,
+) -> list[TaskSlot]:
+    """Expand a slot into batch_size slots with distinct task_types.
+
+    Returns a list starting with the original slot's task_type, followed by
+    other task_types available for the same (domain, language). If not enough
+    distinct types exist, duplicates the original type to fill.
+    """
+    exclude = exclude_indices or set()
+    same_dl = [
+        s for i, s in enumerate(DISTRIBUTION)
+        if i not in exclude
+        and s.domain == slot.domain
+        and s.language == slot.language
+        and s.task_type != slot.task_type
+    ]
+
+    seen_types: set[str] = {slot.task_type}
+    extras: list[TaskSlot] = []
+    for s in same_dl:
+        if s.task_type not in seen_types:
+            extras.append(TaskSlot(s.task_type, slot.domain, slot.language, s.weight))
+            seen_types.add(s.task_type)
+        if len(extras) >= batch_size - 1:
+            break
+
+    result = [slot] + extras
+    while len(result) < batch_size:
+        result.append(slot)
+    return result[:batch_size]

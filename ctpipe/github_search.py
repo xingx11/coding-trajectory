@@ -119,6 +119,7 @@ def _fetch_json(
     """Fetch JSON from a URL with retries. Prefers requests, falls back to curl."""
     proxy = _resolve_proxy(http_proxy)
 
+    last_error = ""
     if _requests is not None:
         proxies = {"http": proxy, "https": proxy} if proxy else None
         for attempt in range(max_retries):
@@ -181,7 +182,7 @@ def search_projects(
         "order": "desc",
         "per_page": min(count * 3, 30),
     })
-    url = f"https://api.github.com/search/repositories?{params}"
+    base_url = f"https://api.github.com/search/repositories?{params}"
 
     headers = {
         "Accept": "application/vnd.github.v3+json",
@@ -190,26 +191,37 @@ def search_projects(
     if github_token:
         headers["Authorization"] = f"token {github_token}"
 
-    print(f"  [github] Querying: {query[:80]}...")
-    t0 = time.time()
-    data = _fetch_json(url, headers, http_proxy=http_proxy)
-    print(f"  [github] Search API returned in {time.time() - t0:.1f}s")
-    if data is None:
-        return []
-
     repos: list[GitHubRepo] = []
-    for item in data.get("items", []):
-        full_name = item.get("full_name", "")
-        if full_name in exclude:
-            continue
-        repos.append(GitHubRepo(
-            full_name=full_name,
-            clone_url=item.get("clone_url", ""),
-            description=(item.get("description") or "")[:200],
-            language=item.get("language") or "",
-            stars=item.get("stargazers_count", 0),
-            updated_at=item.get("updated_at", ""),
-        ))
+    max_pages = max(3, 1 + len(exclude) // 30)
+
+    for page in range(1, max_pages + 1):
+        url = f"{base_url}&page={page}"
+        print(f"  [github] Querying page {page}: {query[:80]}...")
+        t0 = time.time()
+        data = _fetch_json(url, headers, http_proxy=http_proxy)
+        print(f"  [github] Search API returned in {time.time() - t0:.1f}s")
+        if data is None:
+            break
+
+        items = data.get("items", [])
+        if not items:
+            break
+
+        for item in items:
+            full_name = item.get("full_name", "")
+            if full_name in exclude:
+                continue
+            repos.append(GitHubRepo(
+                full_name=full_name,
+                clone_url=item.get("clone_url", ""),
+                description=(item.get("description") or "")[:200],
+                language=item.get("language") or "",
+                stars=item.get("stargazers_count", 0),
+                updated_at=item.get("updated_at", ""),
+            ))
+            if len(repos) >= count:
+                break
+
         if len(repos) >= count:
             break
 
@@ -277,4 +289,194 @@ def search_and_clone(
         time.sleep(1)
 
     print(f"  WARNING: all clone attempts failed for {domain}/{language}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Gitee support
+# ---------------------------------------------------------------------------
+
+GITEE_LANGUAGE_MAP: dict[str, str] = {
+    "ts": "TypeScript",
+    "js": "JavaScript",
+    "python": "Python",
+    "java": "Java",
+    "go": "Go",
+    "c": "C",
+    "c++": "C++",
+    "rust": "Rust",
+    "kotlin": "Kotlin",
+    "swift": "Swift",
+    "dart": "Dart",
+    "lua": "Lua",
+    "shell": "Shell",
+    "html/css": "HTML",
+    "sql": "",
+    "ruby": "Ruby",
+    "c#": "C#",
+    "php": "PHP",
+    "scala": "Scala",
+    "r": "R",
+    "other": "",
+}
+
+GITEE_DOMAIN_SEARCH_TERMS: dict[str, str] = {
+    "web_frontend": "frontend vue react",
+    "backend_service": "api server backend",
+    "mobile_app": "android ios mobile",
+    "data_engineering": "etl pipeline data",
+    "ai_ml": "machine-learning deep-learning",
+    "devtools_test": "test framework cli",
+    "devops_infrastructure": "docker kubernetes devops",
+    "game_dev": "game 游戏",
+    "database_storage": "database orm cache",
+    "desktop_gui": "electron desktop gui",
+    "graphics_media": "rendering visualization image",
+    "business_logic": "order workflow erp",
+    "docs_knowledge": "documentation wiki docs",
+    "embedded_system": "firmware iot embedded",
+    "pkg_manager_cli": "cli 命令行",
+    "operating_system": "kernel filesystem operating-system",
+    "security_auth": "security authentication authorization",
+    "lang_runtime": "compiler interpreter runtime",
+    "scientific_computing": "simulation numerical scientific",
+    "cms_ecommerce": "cms ecommerce storefront",
+    "blockchain_web3": "blockchain smart-contract web3",
+}
+
+
+_GITEE_WIDGET_ID = "wong1slagnlmzwvsu5ya"
+_GITEE_SEARCH_URL = f"https://so.gitee.com/v1/search/widget/{_GITEE_WIDGET_ID}"
+
+
+def _gitee_search_page(
+    query: str,
+    headers: dict[str, str],
+    page_size: int,
+    max_pages: int,
+    min_stars: int,
+    exclude: set[str],
+    count: int,
+) -> list[GitHubRepo]:
+    """Run paginated Indexea widget search and return filtered repos."""
+    repos: list[GitHubRepo] = []
+    for page in range(max_pages):
+        qs = urllib.parse.urlencode({"q": query, "size": page_size, "from": page * page_size})
+        url = f"{_GITEE_SEARCH_URL}?{qs}"
+        print(f"  [gitee] Querying page {page + 1}: {query[:60]}...")
+        t0 = time.time()
+        data = _fetch_json(url, headers, http_proxy="")
+        print(f"  [gitee] Search API returned in {time.time() - t0:.1f}s")
+        if data is None:
+            break
+
+        hits = (data.get("hits") or {}).get("hits") or []
+        if not hits:
+            break
+
+        for hit in hits:
+            fields = hit.get("fields") or {}
+            repo_url = (fields.get("url") or [""])[0]
+            if not repo_url:
+                continue
+            full_name = repo_url.removeprefix("https://gitee.com/").strip("/")
+            stars = (fields.get("count.star") or [0])[0]
+            langs = fields.get("langs") or []
+            is_fork = (fields.get("fork") or [0])[0]
+
+            if full_name in exclude:
+                continue
+            if is_fork:
+                continue
+            if stars < min_stars:
+                continue
+
+            clone_url = f"{repo_url}.git"
+            repos.append(GitHubRepo(
+                full_name=full_name,
+                clone_url=clone_url,
+                description=((fields.get("description") or [""])[0])[:200],
+                language=langs[0] if langs else "",
+                stars=stars,
+                updated_at=((fields.get("last_push_at") or [""])[0]),
+            ))
+            if len(repos) >= count:
+                break
+
+        if len(repos) >= count:
+            break
+
+    return repos
+
+
+def search_projects_gitee(
+    domain: str,
+    language: str,
+    count: int = 5,
+    min_stars: int = 30,
+    exclude_repos: set[str] | None = None,
+    gitee_token: str = "",
+) -> list[GitHubRepo]:
+    """Search Gitee for projects matching domain and language criteria.
+
+    Uses the so.gitee.com Indexea widget search (the v5 search API no longer
+    returns public results for personal access tokens).
+    """
+    exclude = exclude_repos or set()
+    raw_terms = GITEE_DOMAIN_SEARCH_TERMS.get(domain, DOMAIN_SEARCH_TERMS.get(domain, domain.replace("_", " ")))
+    domain_kw = raw_terms.split()[:2]
+    gitee_lang = GITEE_LANGUAGE_MAP.get(language, language)
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "ctpipe/1.0",
+    }
+    page_size = 50
+    max_pages = max(3, 1 + len(exclude) // page_size)
+
+    if gitee_lang:
+        query = " ".join(domain_kw + [gitee_lang])
+        repos = _gitee_search_page(query, headers, page_size, max_pages, min_stars, exclude, count)
+        if len(repos) >= count:
+            print(f"  [gitee] Found {len(repos)} candidate repos")
+            return repos
+        already = {r.full_name for r in repos}
+        exclude = exclude | already
+
+    query_fallback = " ".join(domain_kw)
+    repos_fb = _gitee_search_page(query_fallback, headers, page_size, max_pages, min_stars, exclude, count - len(repos) if gitee_lang else count)
+    if gitee_lang:
+        repos.extend(repos_fb)
+    else:
+        repos = repos_fb
+
+    print(f"  [gitee] Found {len(repos)} candidate repos")
+    return repos
+
+
+def search_and_clone_gitee(
+    domain: str,
+    language: str,
+    task_id: str,
+    dest_root: Path,
+    exclude_repos: set[str] | None = None,
+    gitee_token: str = "",
+    http_proxy: str = "",
+) -> tuple[GitHubRepo, Path] | None:
+    """Search Gitee for a project and clone the first successful one."""
+    repos = search_projects_gitee(
+        domain, language, count=5,
+        exclude_repos=exclude_repos, gitee_token=gitee_token,
+    )
+    if not repos:
+        print(f"  WARNING: no repos found on Gitee for {domain}/{language}")
+        return None
+
+    for repo in repos:
+        path = clone_project(repo, dest_root, task_id, http_proxy="")
+        if path:
+            return repo, path
+        time.sleep(1)
+
+    print(f"  WARNING: all Gitee clone attempts failed for {domain}/{language}")
     return None

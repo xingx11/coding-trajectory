@@ -7,6 +7,7 @@ Supports idempotent re-runs: each subcommand skips completed tasks.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ class PipelineState:
     def __init__(self, path: Path):
         self._path = path
         self._data: dict[str, dict[str, Any]] = {}
+        self._batch_depth = 0
         if path.exists():
             try:
                 self._data = json.loads(path.read_text(encoding="utf-8"))
@@ -27,13 +29,23 @@ class PipelineState:
         tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self._path)
 
+    @contextmanager
+    def batch(self):
+        self._batch_depth += 1
+        try:
+            yield
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                self.save()
+
     def _task(self, task_id: str) -> dict[str, Any]:
         if task_id not in self._data:
             self._data[task_id] = {}
         return self._data[task_id]
 
     def get(self, task_id: str, stage: str, model: str | None = None) -> dict[str, Any]:
-        task = self._task(task_id)
+        task = self._data.get(task_id, {})
         stage_data = task.get(stage, {})
         if model:
             return stage_data.get(model, {})
@@ -47,7 +59,8 @@ class PipelineState:
             task[stage][model] = {**task[stage].get(model, {}), **data}
         else:
             task[stage] = {**task.get(stage, {}), **data}
-        self.save()
+        if self._batch_depth == 0:
+            self.save()
 
     def is_done(self, task_id: str, stage: str, model: str | None = None) -> bool:
         info = self.get(task_id, stage, model)

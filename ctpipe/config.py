@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -36,6 +37,35 @@ class TaskConfig:
     def project_subdir(self) -> str:
         return self.project_path.name
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "project_path": str(self.project_path),
+            "clone_method": self.clone_method,
+            "task_type": self.task_type,
+            "domain": self.domain,
+            "language": self.language,
+            "prompt_qwen": self.prompt_qwen,
+            "prompt_claude": self.prompt_claude,
+            "followups_qwen": list(self.followups_qwen),
+            "followups_claude": list(self.followups_claude),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> TaskConfig:
+        return cls(
+            id=str(data["id"]),
+            project_path=Path(str(data["project_path"])),
+            clone_method=str(data.get("clone_method", "git")),
+            task_type=str(data["task_type"]),
+            domain=str(data["domain"]),
+            language=str(data["language"]),
+            prompt_qwen=str(data["prompt_qwen"]),
+            prompt_claude=str(data["prompt_claude"]),
+            followups_qwen=[str(item) for item in data.get("followups_qwen", [])],
+            followups_claude=[str(item) for item in data.get("followups_claude", [])],
+        )
+
 
 @dataclass
 class BatchConfig:
@@ -46,6 +76,7 @@ class BatchConfig:
     qwen: ModelConfig
     claude: ModelConfig
     github_token: str = ""
+    gitee_token: str = ""
     http_proxy: str = ""
 
     @property
@@ -63,6 +94,10 @@ class BatchConfig:
     @property
     def docs_dir(self) -> Path:
         return self.base_dir / "docs"
+
+    @property
+    def task_manifest_path(self) -> Path:
+        return self.delivery_dir / "metadata" / "tasks.json"
 
 
 def _find_git_bash() -> str:
@@ -98,7 +133,37 @@ def _extract_host(url: str) -> str:
         return ""
 
 
-def build_claude_env(model_config: ModelConfig, http_proxy: str = "") -> dict[str, str]:
+SUBMISSION_FIELDNAMES = [
+    "id",
+    "qwen 本地trajectory",
+    "qwen session id",
+    "qwen rubrics 人工评分",
+    "claude 本地trajectory",
+    "claude session id",
+    "claude rubrics 人工评分",
+    "qwen passrate",
+    "claude passrate",
+    "任务类型",
+    "应用领域",
+    "编程语言",
+]
+
+SUBMISSION_KEY_MAP: dict[str, str] = {
+    "qwen 本地trajectory": "qwen_trajectory",
+    "qwen session id": "qwen_session_id",
+    "qwen rubrics 人工评分": "qwen_score_path",
+    "claude 本地trajectory": "claude_trajectory",
+    "claude session id": "claude_session_id",
+    "claude rubrics 人工评分": "claude_score_path",
+    "qwen passrate": "qwen_passrate",
+    "claude passrate": "claude_passrate",
+    "任务类型": "task_type",
+    "应用领域": "domain",
+    "编程语言": "language",
+}
+
+
+def build_claude_env(model_config: ModelConfig) -> dict[str, str]:
     """Build environment dict for running `claude -p` subprocesses.
 
     Sets ANTHROPIC_AUTH_TOKEN (Claude Code's auth), ANTHROPIC_BASE_URL,
@@ -183,6 +248,7 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
         qwen=qwen,
         claude=claude,
         github_token=env.get("GITHUB_TOKEN", ""),
+        gitee_token=env.get("GITEE_TOKEN", ""),
         http_proxy=env.get("HTTP_PROXY", ""),
     )
 
@@ -197,3 +263,25 @@ def select_tasks(tasks: Iterable[TaskConfig], task_ids: list[str] | None = None)
     if missing:
         raise ValueError(f"Unknown task IDs: {', '.join(missing)}")
     return [task_map[task_id] for task_id in task_ids]
+
+
+def load_task_manifest(path: Path) -> list[TaskConfig]:
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return [TaskConfig.from_dict(item) for item in data.get("tasks", [])]
+
+
+def write_task_manifest(path: Path, tasks: Iterable[TaskConfig]) -> None:
+    payload = {
+        "tasks": [task.to_dict() for task in tasks],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def select_delivery_tasks(config: BatchConfig, task_ids: list[str] | None = None) -> list[TaskConfig]:
+    manifest_tasks = load_task_manifest(config.task_manifest_path)
+    if manifest_tasks:
+        return select_tasks(manifest_tasks, task_ids)
+    return select_tasks(config.tasks, task_ids)

@@ -73,3 +73,14 @@ def calc_passrate(criteria: list[Criterion]) -> float:
     if total_points <= 0:
         raise ValueError("Non-positive total points")
     return total_score / total_points
+
+
+EXPECTED_CRITERIA_COUNT = 7
+
+
+def is_unscored_template(criteria: list[Criterion]) -> bool:
+    return all(c.score == 0 and not c.rationale for c in criteria)
+
+
+def is_complete_rubric(criteria: list[Criterion]) -> bool:
+    return len(criteria) == EXPECTED_CRITERIA_COUNT

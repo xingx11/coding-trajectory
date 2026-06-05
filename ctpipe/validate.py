@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import csv
 
-from ctpipe.config import BatchConfig, select_tasks
-from ctpipe.toml_utils import calc_passrate, read_quality_toml
+from ctpipe.config import BatchConfig, select_delivery_tasks
+from ctpipe.toml_utils import calc_passrate, is_complete_rubric, is_unscored_template, read_quality_toml
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 
-def validate(config: BatchConfig, task_ids: list[str] | None = None) -> bool:
-    tasks = select_tasks(config.tasks, task_ids)
+def validate(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None) -> bool:
+    tasks = select_delivery_tasks(config, task_ids)
+    models = models or ["qwen", "claude"]
     delivery_dir = config.delivery_dir
     issues: list[str] = []
+
+    if not tasks:
+        issues.append("no tasks found in delivery manifest or tasks.toml")
 
     submission_rows: dict[str, dict[str, str]] = {}
     submission_path = delivery_dir / "submission.csv"
@@ -34,7 +38,7 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None) -> bool:
         if not row:
             issues.append(f"[{task.id}] submission row missing")
 
-        for model_name in ("qwen", "claude"):
+        for model_name in models:
             trajectory_path = find_delivery_trajectory(delivery_dir, model_name, task.id)
             if not trajectory_path:
                 issues.append(
@@ -44,6 +48,12 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None) -> bool:
                 continue
 
             info = parse_trajectory(trajectory_path)
+            if not info.session_id and not info.models:
+                issues.append(
+                    f"[{task.id}/{model_name}] trajectory has no valid content "
+                    f"(lines={info.line_count})"
+                )
+                continue
             if info.detected_provider not in ("unknown", model_name):
                 issues.append(
                     f"[{task.id}/{model_name}] provider mismatch: detected {info.detected_provider}"
@@ -78,8 +88,21 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None) -> bool:
                 issues.append(f"[{task.id}/{model_name}] score file missing: {score_path.name}")
                 continue
 
-            criteria = read_quality_toml(score_path)
-            if not any(item.score > 0 for item in criteria):
+            try:
+                criteria = read_quality_toml(score_path)
+            except Exception as exc:
+                issues.append(f"[{task.id}/{model_name}] score read error: {exc}")
+                continue
+
+            if is_unscored_template(criteria):
+                issues.append(f"[{task.id}/{model_name}] score file is unscored template: {score_path.name}")
+                continue
+
+            if not is_complete_rubric(criteria):
+                issues.append(
+                    f"[{task.id}/{model_name}] score file incomplete: "
+                    f"{len(criteria)} criteria (expected 7)"
+                )
                 continue
 
             passrate = f"{calc_passrate(criteria):.4f}"

@@ -8,8 +8,17 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ctpipe.config import BatchConfig, TaskConfig, select_tasks
+from ctpipe.config import SUBMISSION_FIELDNAMES, BatchConfig, TaskConfig, load_task_manifest, select_tasks, write_task_manifest
 from ctpipe.state import PipelineState
+
+
+def _all_known_tasks(config: BatchConfig) -> list[TaskConfig]:
+    manifest = load_task_manifest(config.task_manifest_path)
+    seen: dict[str, TaskConfig] = {t.id: t for t in manifest}
+    for t in config.tasks:
+        if t.id not in seen:
+            seen[t.id] = t
+    return list(seen.values())
 
 SETTINGS_LOCAL = {
     "permissions": {
@@ -39,21 +48,7 @@ def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = task.project_path
 
-    # Check if the other model's clone already exists — reuse it as local source
-    other_model = "claude" if model == "qwen" else "qwen"
-    other_dest = runs_root / f"{task.id}-{other_model}" / task.project_subdir
-
-    if other_dest.is_dir() and task.clone_method == "git" and (other_dest / ".git").is_dir():
-        subprocess.run(
-            ["git", "clone", "--local", "--depth", "1", str(other_dest), str(dest)],
-            check=True,
-            capture_output=True,
-        )
-        print(f"  [local clone] {other_dest.name} -> {dest}")
-    elif other_dest.is_dir():
-        shutil.copytree(str(other_dest), str(dest), ignore=IGNORE_PATTERNS)
-        print(f"  [copy from sibling] {other_dest.name} -> {dest}")
-    elif task.clone_method == "git" and (src / ".git").is_dir():
+    if task.clone_method == "git" and (src / ".git").is_dir():
         subprocess.run(
             ["git", "clone", "--depth", "1", str(src), str(dest)],
             check=True,
@@ -76,16 +71,16 @@ def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> Path:
 def _create_submission_csv(config: BatchConfig, csv_path: Path) -> None:
     template_csv = config.docs_dir / "submission_template.csv"
     if template_csv.exists():
-        shutil.copy2(template_csv, csv_path)
+        with template_csv.open("r", encoding="utf-8-sig", newline="") as src:
+            reader = csv.reader(src)
+            header = next(reader, None)
+        if header:
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as dest:
+                writer = csv.writer(dest)
+                writer.writerow(header)
         return
 
-    fieldnames = [
-        "id",
-        "qwen 本地trajectory", "qwen session id", "qwen rubrics 人工评分",
-        "claude 本地trajectory", "claude session id", "claude rubrics 人工评分",
-        "qwen passrate", "claude passrate",
-        "任务类型", "应用领域", "编程语言",
-    ]
+    fieldnames = SUBMISSION_FIELDNAMES
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -102,7 +97,7 @@ def _create_delivery_skeleton(config: BatchConfig) -> None:
     ]:
         (delivery_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    for task in config.tasks:
+    for task in _all_known_tasks(config):
         for model in ("qwen", "claude"):
             src_template = config.rubrics_dir / model / f"{task.id}.quality.toml"
             dest_score = delivery_dir / "scores" / model / f"{task.id}.quality.toml"
@@ -114,29 +109,124 @@ def _create_delivery_skeleton(config: BatchConfig) -> None:
         _create_submission_csv(config, csv_path)
 
 
+def _build_metadata_content(task: TaskConfig) -> str:
+    followups_qwen = "\n".join(f"- {item}" for item in task.followups_qwen) or "- "
+    followups_claude = "\n".join(f"- {item}" for item in task.followups_claude) or "- "
+    return f"""# {task.id} Metadata
+
+## Codebase
+
+- Project path: {task.project_path}
+- Source: local project / open-source project
+- Open-source repo URL:
+- Commit / branch / snapshot:
+
+## Task Label
+
+- Task type: {task.task_type}
+- Application domain: {task.domain}
+- Language: {task.language}
+
+## Qwen Conversation
+
+- Session id:
+- Trajectory file: trajectories/qwen/{task.id}.jsonl
+- Round count: {1 + len(task.followups_qwen)}
+- Prompt strategy: same-theme / different-follow-up / related-task
+- Initial prompt:
+
+```text
+{task.prompt_qwen}
+```
+
+- Follow-up summary:
+
+```text
+{followups_qwen}
+```
+
+## Claude Conversation
+
+- Session id:
+- Trajectory file: trajectories/claude/{task.id}.jsonl
+- Round count: {1 + len(task.followups_claude)}
+- Prompt strategy: same-theme / different-follow-up / related-task
+- Initial prompt:
+
+```text
+{task.prompt_claude}
+```
+
+- Follow-up summary:
+
+```text
+{followups_claude}
+```
+
+## Scoring
+
+- Qwen score file: scores/qwen/{task.id}.quality.toml
+- Claude score file: scores/claude/{task.id}.quality.toml
+- Qwen passrate:
+- Claude passrate:
+
+## Notes
+
+- Are Qwen and Claude prompts identical? yes / no
+- If no, why are they still comparable?
+- Any environment issue:
+- Any manual intervention:
+"""
+
+
+def _create_metadata_stub(config: BatchConfig, task: TaskConfig) -> None:
+    metadata_path = config.delivery_dir / "metadata" / f"{task.id}.md"
+    if metadata_path.exists():
+        return
+    metadata_path.write_text(_build_metadata_content(task), encoding="utf-8")
+
+
 def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
     state = PipelineState(config.delivery_dir / "pipeline_state.json")
 
     print("Creating delivery directory skeleton...")
     _create_delivery_skeleton(config)
 
-    tasks = select_tasks(config.tasks, task_ids)
+    all_tasks = _all_known_tasks(config)
+    tasks = select_tasks(all_tasks, task_ids)
+
+    existing = load_task_manifest(config.task_manifest_path)
+    existing_ids = {t.id for t in existing}
+    merged = list(existing)
+    for task in tasks:
+        if task.id not in existing_ids:
+            merged.append(task)
+            existing_ids.add(task.id)
+    write_task_manifest(config.task_manifest_path, merged)
 
     for task in tasks:
-        if state.is_done(task.id, "prepare"):
-            print(f"[{task.id}] prepare already done, skipping")
-            continue
+        with state.batch():
+            if state.is_done(task.id, "prepare"):
+                prep_info = state.get(task.id, "prepare")
+                qwen_ok = Path(prep_info.get("qwen_dir", "")).is_dir()
+                claude_ok = Path(prep_info.get("claude_dir", "")).is_dir()
+                if qwen_ok and claude_ok:
+                    print(f"[{task.id}] prepare already done, skipping")
+                    _create_metadata_stub(config, task)
+                    continue
+                print(f"[{task.id}] prepare marked done but directories missing, re-cloning...")
 
-        print(f"[{task.id}] Cloning project for qwen and claude...")
-        qwen_dir = _clone_project(task, "qwen", config.runs_root)
-        claude_dir = _clone_project(task, "claude", config.runs_root)
+            print(f"[{task.id}] Cloning project for qwen and claude...")
+            qwen_dir = _clone_project(task, "qwen", config.runs_root)
+            claude_dir = _clone_project(task, "claude", config.runs_root)
+            _create_metadata_stub(config, task)
 
-        state.set(
-            task.id,
-            "prepare",
-            status="done",
-            qwen_dir=str(qwen_dir),
-            claude_dir=str(claude_dir),
-        )
+            state.set(
+                task.id,
+                "prepare",
+                status="done",
+                qwen_dir=str(qwen_dir),
+                claude_dir=str(claude_dir),
+            )
 
     print("Prepare complete.")

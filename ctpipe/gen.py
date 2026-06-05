@@ -7,12 +7,15 @@ import json
 import re
 import time
 import tomllib
+from contextlib import nullcontext
 from pathlib import Path
 
 from ctpipe import strip_claude_wrapper
 from ctpipe.config import BatchConfig, build_claude_env
-from ctpipe.distribution import TaskSlot, sample_slots
-from ctpipe.github_search import search_and_clone
+from ctpipe.distribution import DISTRIBUTION, TaskSlot, expand_slot_for_batch, sample_slots
+
+VALID_TASK_TYPES = {slot.task_type for slot in DISTRIBUTION}
+from ctpipe.github_search import search_and_clone, search_and_clone_gitee
 from ctpipe.toml_utils import Criterion, write_quality_toml
 
 CRITERIA_NAMES = [
@@ -39,7 +42,7 @@ Return ONLY valid JSON (no markdown):
 {"task_title": "short title", "task_description": "2-3 sentences", "key_files": ["file1"], "acceptance_criteria": ["c1", "c2"]}"""
 
 MULTI_IDEA_PROMPT = """You are a coding-task designer. Propose {count} DISTINCT coding tasks for this project.
-Each task must be a different type from: {task_types}.
+Each task must match the type assigned in its spec below. Tasks with the same type must still be distinct tasks.
 Requirements: realistic, requires cross-file understanding, clear acceptance criteria.
 Return ONLY a valid JSON array (no markdown):
 [{{"task_title": "title", "task_description": "desc", "task_type": "type", "key_files": ["f1"], "acceptance_criteria": ["c1"]}}]"""
@@ -222,27 +225,29 @@ def _parse_idea_output(raw: str) -> dict | None:
 
 async def _call_gen_multi_ideas(
     project_summary: str,
-    task_types: list[str],
-    domain: str,
-    language: str,
+    task_specs: list[tuple[str, str, str]],
     env: dict[str, str],
     model: str = "",
     timeout: int = 180,
 ) -> str:
-    """Stage 1 batch: generate multiple task ideas in one call."""
-    prompt_text = MULTI_IDEA_PROMPT.format(
-        count=len(task_types),
-        task_types=", ".join(task_types),
+    """Stage 1 batch: generate multiple task ideas in one call.
+
+    task_specs is a list of (task_type, domain, language) triples.
+    """
+    prompt_text = MULTI_IDEA_PROMPT.format(count=len(task_specs))
+    spec_lines = "\n".join(
+        f"  {i+1}. type={ttype}, domain={dom}, language={lang}"
+        for i, (ttype, dom, lang) in enumerate(task_specs)
     )
     user_prompt = (
         f"{prompt_text}\n\n---\n"
-        f"Domain: {domain} | Language: {language}\n\n"
+        f"Task specs (generate one idea per line, in order):\n{spec_lines}\n\n"
         f"{project_summary}\n\nReturn JSON array only."
     )
     return await _call_claude_p(user_prompt, env, model=model, timeout=timeout)
 
 
-def _parse_multi_ideas(raw: str, expected_count: int) -> list[dict] | None:
+def _parse_multi_ideas(raw: str) -> list[dict] | None:
     """Parse stage-1 batch output: a JSON array of idea objects."""
     cleaned = strip_claude_wrapper(raw)
 
@@ -394,7 +399,7 @@ def _format_toml_entry(
 def _build_gen_env(config: BatchConfig) -> dict[str, str]:
     if not config.claude.auth_token or not config.claude.base_url or not config.claude.model:
         raise ValueError("Claude config is incomplete in .env (need CLAUDE_AUTH_TOKEN, CLAUDE_BASE_URL, CLAUDE_MODEL)")
-    return build_claude_env(config.claude, http_proxy=config.http_proxy)
+    return build_claude_env(config.claude)
 
 
 def _load_used_repos(state_path: Path) -> set[str]:
@@ -434,6 +439,7 @@ async def generate_single(
     dry_run: bool = False,
     toml_lock: asyncio.Lock | None = None,
     total_timeout: int = 900,
+    source: str = "github",
 ) -> bool:
     """Generate a single task from a slot."""
     t_start = time.time()
@@ -459,13 +465,19 @@ async def generate_single(
             print(f"  ERROR: local path not found: {from_local}")
             return False
     else:
-        print(f"  [{_elapsed()}] Searching GitHub for {slot.domain}/{slot.language} projects...")
-        result = await asyncio.to_thread(
-            search_and_clone, slot.domain, slot.language, task_id, clone_dir,
-            used_repos, config.github_token, config.http_proxy,
-        )
+        print(f"  [{_elapsed()}] Searching {source} for {slot.domain}/{slot.language} projects...")
+        if source == "gitee":
+            result = await asyncio.to_thread(
+                search_and_clone_gitee, slot.domain, slot.language, task_id, clone_dir,
+                used_repos, config.gitee_token, config.http_proxy,
+            )
+        else:
+            result = await asyncio.to_thread(
+                search_and_clone, slot.domain, slot.language, task_id, clone_dir,
+                used_repos, config.github_token, config.http_proxy,
+            )
         if not result:
-            print(f"  [{_elapsed()}] GitHub search/clone failed")
+            print(f"  [{_elapsed()}] {source} search/clone failed")
             return False
         repo, project_path = result
         repo_name = repo.full_name
@@ -578,7 +590,10 @@ async def generate_batch(
     from_local: str | None = None,
     dry_run: bool = False,
     toml_lock: asyncio.Lock | None = None,
+    repo_lock: asyncio.Lock | None = None,
+    api_sem: asyncio.Semaphore | None = None,
     total_timeout: int = 900,
+    source: str = "github",
 ) -> int:
     """Generate multiple tasks from a single project.
 
@@ -587,13 +602,13 @@ async def generate_batch(
     """
     t_start = time.time()
     n = len(slots)
-    id_range = f"{task_ids[0]}..{task_ids[-1]}"
+    id_range = f"{task_ids[0]}..{task_ids[-1]}" if n > 1 else task_ids[0]
     task_types = [s.task_type for s in slots]
     domain = slots[0].domain
     language = slots[0].language
 
     print(f"\n[{id_range}] Batch generating {n} tasks: {', '.join(task_types)}")
-    print(f"  Domain: {domain} / Language: {language}")
+    print(f"  Search: {domain} / {language} (from first slot)")
 
     def _elapsed() -> str:
         return f"{time.time() - t_start:.0f}s"
@@ -605,7 +620,7 @@ async def generate_batch(
         if from_local:
             print(f"  [dry-run] Would use local project: {from_local}")
         else:
-            print(f"  [dry-run] Would search GitHub for {domain}/{language} projects")
+            print(f"  [dry-run] Would search {source} for {domain}/{language} projects")
         print(f"  [dry-run] Would generate {n} tasks: {', '.join(task_types)}")
         return n
 
@@ -615,18 +630,27 @@ async def generate_batch(
             print(f"  ERROR: local path not found: {from_local}")
             return 0
     else:
-        print(f"  [{_elapsed()}] Searching GitHub for {domain}/{language} projects...")
-        result = await asyncio.to_thread(
-            search_and_clone, domain, language, "_projects", clone_dir,
-            used_repos, config.github_token, config.http_proxy,
-        )
-        if not result:
-            print(f"  [{_elapsed()}] GitHub search/clone failed")
+        print(f"  [{_elapsed()}] Searching {source} for {domain}/{language} projects...")
+        lock_ctx = repo_lock if repo_lock else nullcontext()
+        async with lock_ctx:
+            if source == "gitee":
+                result = await asyncio.to_thread(
+                    search_and_clone_gitee, domain, language, "_projects", clone_dir,
+                    used_repos, config.gitee_token, config.http_proxy,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    search_and_clone, domain, language, "_projects", clone_dir,
+                    used_repos, config.github_token, config.http_proxy,
+                )
+            if result:
+                repo, project_path = result
+                repo_name = repo.full_name
+                used_repos.add(repo_name)
+                _save_used_repo(state_path, repo_name)
+        if not from_local and not repo_name:
+            print(f"  [{_elapsed()}] {source} search/clone failed")
             return 0
-        repo, project_path = result
-        repo_name = repo.full_name
-        used_repos.add(repo_name)
-        _save_used_repo(state_path, repo_name)
         print(f"  [{_elapsed()}] Got project: {repo_name}")
 
     print(f"  [{_elapsed()}] Scanning project: {project_path}")
@@ -646,14 +670,21 @@ async def generate_batch(
     for attempt in range(2):
         if attempt > 0:
             print(f"  [{_elapsed()}] [stage 1 retry] Retrying batch idea generation...")
-        ideas_raw = await _call_gen_multi_ideas(
-            summary, task_types, domain, language, env,
-            model=config.claude.model, timeout=stage1_timeout,
-        )
+        sem_ctx = api_sem if api_sem else nullcontext()
+        async with sem_ctx:
+            ideas_raw = await _call_gen_multi_ideas(
+                summary, [(s.task_type, s.domain, s.language) for s in slots], env,
+                model=config.claude.model, timeout=stage1_timeout,
+            )
         if not ideas_raw:
             print(f"  [{_elapsed()}] [stage 1] Empty response")
             continue
-        ideas = _parse_multi_ideas(ideas_raw, n)
+        ideas = _parse_multi_ideas(ideas_raw)
+        if ideas is not None and len(ideas) >= n:
+            break
+        if ideas is not None and len(ideas) < n and attempt == 0:
+            print(f"  [{_elapsed()}] [stage 1] Got {len(ideas)}/{n} ideas, retrying for full count...")
+            continue
         if ideas is not None:
             break
         print(f"  [{_elapsed()}] [stage 1] Could not parse output")
@@ -662,35 +693,74 @@ async def generate_batch(
         print(f"  [{_elapsed()}] ERROR: batch stage 1 failed")
         return 0
 
+    # Fill gaps with single-idea generation if batch returned fewer than expected
+    if len(ideas) < n:
+        print(f"  [{_elapsed()}] [stage 1] Only {len(ideas)}/{n} ideas, filling gaps individually...")
+        for gap_idx in range(len(ideas), n):
+            remaining_time = total_timeout - (time.time() - t_start)
+            if remaining_time < 30:
+                break
+            gap_slot = slots[gap_idx]
+            sem_ctx = api_sem if api_sem else nullcontext()
+            async with sem_ctx:
+                gap_raw = await _call_gen_idea(
+                    summary, gap_slot.task_type, gap_slot.domain, gap_slot.language, env,
+                    model=config.claude.model, timeout=min(120, int(remaining_time * 0.3)),
+                )
+            if gap_raw:
+                gap_idea = _parse_idea_output(gap_raw)
+                if gap_idea:
+                    gap_idea.setdefault("task_type", gap_slot.task_type)
+                    ideas.append(gap_idea)
+                    print(f"  [{_elapsed()}] [fill] Got idea: {gap_idea.get('task_title', '?')}")
+
     print(f"  [{_elapsed()}] [stage 1] Got {len(ideas)} ideas")
     for i, idea in enumerate(ideas):
         print(f"    {i+1}. {idea.get('task_title', '?')}")
 
-    # Stage 2: expand each idea separately
-    successes = 0
+    # Reorder ideas to match slot task_types by greedy matching
+    if len(ideas) >= n:
+        reordered: list[dict | None] = [None] * n
+        used_indices: set[int] = set()
+        for j in range(n):
+            target_type = slots[j].task_type
+            for k, idea in enumerate(ideas[:n]):
+                if k not in used_indices and idea.get("task_type") == target_type:
+                    reordered[j] = idea
+                    used_indices.add(k)
+                    break
+        unmatched = [ideas[k] for k in range(n) if k not in used_indices]
+        for j in range(n):
+            if reordered[j] is None and unmatched:
+                idea = unmatched.pop(0)
+                print(f"  [warn] Idea '{idea.get('task_title', '?')}' (type={idea.get('task_type', '?')}) assigned to slot type={slots[j].task_type}")
+                reordered[j] = idea
+        ideas = [x for x in reordered if x is not None]
+
+    # Stage 2: expand ideas concurrently
     actual_count = min(len(ideas), n)
-    for idx in range(actual_count):
+    remaining_for_stage2 = total_timeout - (time.time() - t_start)
+    if remaining_for_stage2 < 30:
+        print(f"  [{_elapsed()}] ERROR: not enough time left for stage 2")
+        return 0
+    stage2_timeout = min(240, int(remaining_for_stage2))
+
+    async def _expand_one(idx: int) -> bool:
         idea = ideas[idx]
         task_id = task_ids[idx]
-        slot = slots[idx]
+        s = slots[idx]
         idea_json = json.dumps(idea, ensure_ascii=False)
 
-        remaining = total_timeout - (time.time() - t_start)
-        if remaining < 30:
-            print(f"  [{_elapsed()}] Not enough time for more tasks, stopping")
-            break
-
-        idea_task_type = idea.get("task_type", slot.task_type)
-
         print(f"  [{_elapsed()}] [{task_id}] Expanding: {idea.get('task_title', '?')}...")
-        stage2_timeout = min(240, int(remaining))
         data: dict | None = None
         last_raw = ""
         for attempt in range(2):
-            raw = await _call_gen_expand(
-                idea_json, summary, idea_task_type, domain, language, env,
-                model=config.claude.model, timeout=stage2_timeout,
-            )
+            sem_ctx = api_sem if api_sem else nullcontext()
+            async with sem_ctx:
+                raw = await _call_gen_expand(
+                    idea_json, summary, s.task_type, s.domain, s.language, env,
+                    model=config.claude.model, timeout=stage2_timeout,
+                )
             if not raw:
                 continue
             last_raw = raw
@@ -703,7 +773,7 @@ async def generate_batch(
             draft_content = f"=== IDEA ===\n{idea_json}\n\n=== EXPAND ===\n{last_raw or '(empty)'}"
             draft_path.write_text(draft_content, encoding="utf-8")
             print(f"  [{_elapsed()}] [{task_id}] Stage 2 failed, saved draft")
-            continue
+            return False
 
         _write_rubric_templates(config, task_id, data["criteria_descriptions"])
 
@@ -712,9 +782,9 @@ async def generate_batch(
             task_id=task_id,
             project_path=project_path_str,
             clone_method="git",
-            task_type=idea_task_type,
-            domain=domain,
-            language=language,
+            task_type=s.task_type,
+            domain=s.domain,
+            language=s.language,
             prompt_qwen=data["prompt_qwen"],
             prompt_claude=data["prompt_claude"],
             followups_qwen=data["followups_qwen"],
@@ -729,8 +799,14 @@ async def generate_batch(
         else:
             with toml_path.open("a", encoding="utf-8") as f:
                 f.write(toml_entry)
-        print(f"  [{_elapsed()}] [{task_id}] OK: {idea_task_type}")
-        successes += 1
+        print(f"  [{_elapsed()}] [{task_id}] OK: {s.task_type}")
+        return True
+
+    results = await asyncio.gather(
+        *[_expand_one(idx) for idx in range(actual_count)],
+        return_exceptions=True,
+    )
+    successes = sum(1 for r in results if r is True)
 
     if repo_name:
         print(f"  Source: {repo_name}")
@@ -749,24 +825,31 @@ async def generate(
     dry_run: bool = False,
     total_timeout: int = 900,
     per_project: int = 1,
+    source: str = "github",
 ) -> int:
     """Main generation entry point."""
     state_path = config.delivery_dir / "pipeline_state.json"
     used_repos = _load_used_repos(state_path)
 
-    slots = sample_slots(count, domain=domain, language=language, task_type=task_type)
-    if not slots:
+    if per_project > 1:
+        num_projects = -(-count // per_project)  # ceil division
+        sampled = sample_slots(num_projects, domain=domain, language=language, task_type=task_type)
+        label = f"{len(sampled)} project slots (each expands to {per_project} tasks)"
+    else:
+        sampled = sample_slots(count, domain=domain, language=language, task_type=task_type)
+        label = f"{len(sampled)} task slots"
+
+    if not sampled:
         print(f"ERROR: no matching slots in distribution table")
         return 1
 
-    print(f"Sampled {len(slots)} task slots from distribution")
-    for i, (idx, slot) in enumerate(slots, 1):
+    print(f"Sampled {label} from distribution")
+    for i, (idx, slot) in enumerate(sampled, 1):
         print(f"  {i}. [{idx}] {slot.task_type} / {slot.domain} / {slot.language} (w={slot.weight})")
 
     env = _build_gen_env(config)
     effective_clone_dir = clone_dir or config.runs_root
 
-    # Diagnostic: show key config for debugging
     base_url = config.claude.base_url
     model = config.claude.model
     proxy = env.get("HTTPS_PROXY", "") or env.get("HTTP_PROXY", "")
@@ -783,32 +866,49 @@ async def generate(
     start_num = int(m.group(1))
 
     toml_lock = asyncio.Lock()
+    repo_lock = asyncio.Lock()
+    api_sem = asyncio.Semaphore(config.max_parallel)
     total_success = 0
-    total_count = len(slots)
+    total_count = 0
+    task_idx = 0
 
     if per_project > 1:
-        # Batch mode: group slots and generate multiple tasks per project
-        groups = _group_slots([slot for _, slot in slots], per_project)
-        print(f"\nGrouped into {len(groups)} project batches (per_project={per_project})")
+        print(f"\nExpanding {len(sampled)} slots into {per_project} tasks each (max {config.max_parallel} concurrent API calls)")
 
-        task_idx = 0
-        for group_idx, group in enumerate(groups):
-            group_ids = [f"CT-{start_num + task_idx + i:04d}" for i in range(len(group))]
+        async def _run_batch(batch_idx: int, slot: TaskSlot) -> tuple[int, int]:
+            batch_slots = expand_slot_for_batch(slot, per_project)
+            batch_size = len(batch_slots)
+            offset = batch_idx * per_project
+            batch_ids = [f"CT-{start_num + offset + i:04d}" for i in range(batch_size)]
             successes = await generate_batch(
-                group, group_ids, config, env, effective_clone_dir,
+                batch_slots, batch_ids, config, env, effective_clone_dir,
                 used_repos, state_path, from_local, dry_run,
-                toml_lock=toml_lock, total_timeout=total_timeout,
+                toml_lock=toml_lock, repo_lock=repo_lock,
+                api_sem=api_sem, total_timeout=total_timeout,
+                source=source,
             )
-            total_success += successes
-            task_idx += len(group)
+            return successes, batch_size
+
+        results = await asyncio.gather(
+            *[_run_batch(i, slot) for i, (_, slot) in enumerate(sampled)],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                print(f"  ERROR: batch failed with exception: {r}")
+                total_count += per_project
+            else:
+                total_success += r[0]
+                total_count += r[1]
     else:
-        # Sequential single-task mode
-        for i, (_, slot) in enumerate(slots):
+        total_count = len(sampled)
+        for i, (_, slot) in enumerate(sampled):
             task_id = f"CT-{start_num + i:04d}"
             ok = await generate_single(
                 slot, task_id, config, env, effective_clone_dir,
                 used_repos, state_path, from_local, dry_run,
                 toml_lock=toml_lock, total_timeout=total_timeout,
+                source=source,
             )
             if ok:
                 total_success += 1
@@ -817,21 +917,3 @@ async def generate(
     print(f"\n{'=' * 60}")
     print(f"Generation complete: {total_success} succeeded, {failed} failed, {total_count} total")
     return 0 if failed == 0 else 1
-
-
-def _group_slots(slots: list[TaskSlot], per_project: int) -> list[list[TaskSlot]]:
-    """Group slots into batches of per_project items.
-
-    Merges small groups (same language preferred) until each batch
-    has per_project items. Leftover slots get their own batch.
-    """
-    groups: list[list[TaskSlot]] = []
-    current: list[TaskSlot] = []
-    for slot in slots:
-        current.append(slot)
-        if len(current) >= per_project:
-            groups.append(current)
-            current = []
-    if current:
-        groups.append(current)
-    return groups

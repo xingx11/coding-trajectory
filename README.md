@@ -116,7 +116,12 @@ CLAUDE_MODEL=claude-opus-4-6-20260205
 # 创建地址：https://github.com/settings/tokens（无需勾选任何权限，public repo 搜索不需要 scope）
 GITHUB_TOKEN=<your-github-token>
 
+# 可选：Gitee Token（gen --source gitee 必需，搜索 API 要求认证）
+# 创建地址：https://gitee.com/personal_access_tokens
+GITEE_TOKEN=<your-gitee-token>
+
 # HTTP 代理（中国大陆必需，用于 GitHub API 搜索和 git clone）
+# 注意：Gitee 不需要代理
 # 示例：http://127.0.0.1:7897
 HTTP_PROXY=<your-proxy-url>
 ```
@@ -150,6 +155,9 @@ python -m ctpipe gen --count 5 --task-type bug-fix
 
 # 从已有本地项目生成（不搜索 GitHub）
 python -m ctpipe gen --count 3 --from-local "D:\A3Code\YongFu\Yongfu-Web"
+
+# 从 Gitee 搜索项目（国内直连，不需要代理）
+python -m ctpipe gen --count 45 --per-project 3 --source gitee
 
 # 预览模式（不 clone、不写文件、不调用 AI）
 python -m ctpipe gen --count 45 --per-project 3 --dry-run
@@ -243,10 +251,11 @@ python -m ctpipe prepare
 
 做了什么：
 1. 创建 `delivery_YYYYMMDD/` 交付目录骨架（trajectories、scores、metadata 子目录）
-2. 为每个任务克隆 2 份源项目到隔离的运行目录（`runs_root/CT-xxxx-qwen/`、`runs_root/CT-xxxx-claude/`）
+2. 为每个任务从 `project_path` 克隆 2 份独立源项目到隔离的运行目录（`runs_root/CT-xxxx-qwen/`、`runs_root/CT-xxxx-claude/`），保证两侧基线完全一致
 3. 在每个运行目录写入 `.claude/settings.local.json`，授予 Claude Code 全量工具权限
 4. 将 rubric 模板复制到交付目录 scores 下
 5. 初始化 `submission.csv` 模板
+6. 已完成的任务在重跑时会验证运行目录是否仍存在，如被清理则自动重新克隆
 
 #### Stage 2：Run — 执行编码任务
 
@@ -339,6 +348,7 @@ python -m ctpipe validate
 |------|------|
 | `python -m ctpipe gen --count 45 --per-project 3` | 全自动生成 45 条任务（15 个仓库，每个 3 条） |
 | `python -m ctpipe gen --count 45` | 全自动生成 45 条任务（45 个仓库，每个 1 条） |
+| `python -m ctpipe gen --count 45 --per-project 3 --source gitee` | 从 Gitee 搜索项目（国内免代理） |
 | `python -m ctpipe all` | 运行全流程（prepare→run→collect→score→finalize→validate） |
 | `python -m ctpipe prepare` | 仅克隆项目 + 创建交付骨架 |
 | `python -m ctpipe run --tasks CT-0001 CT-0002` | 运行指定任务 |
@@ -347,6 +357,8 @@ python -m ctpipe validate
 | `python -m ctpipe score` | AI 自动评分 |
 | `python -m ctpipe finalize` | 计算 passrate + 生成 submission.csv |
 | `python -m ctpipe validate` | 校验交付完整性 |
+| `python -m ctpipe validate --models qwen` | 仅校验 Qwen 侧数据 |
+| `python -m ctpipe reset --tasks CT-0001 --stages run collect` | 重置指定任务的指定阶段状态 |
 | `python rubrics_templates\calc_passrate.py <path>` | 手动计算 passrate |
 
 ### 可选参数
@@ -376,6 +388,9 @@ python -m ctpipe gen --count 5 --clone-dir "D:\A3Code\cloned_projects"
 # gen：调整单任务生成超时（默认 900s）
 python -m ctpipe gen --count 5 --gen-timeout 1200
 
+# gen：从 Gitee 搜索项目（国内直连，无需代理）
+python -m ctpipe gen --count 45 --per-project 3 --source gitee
+
 # gen：预览模式（不 clone、不写文件、不调用 AI）
 python -m ctpipe gen --count 45 --per-project 3 --dry-run
 ```
@@ -389,7 +404,8 @@ Pipeline 通过 `pipeline_state.json` 记录每个任务在每个阶段的完成
 这意味着：
 - 中途失败后直接重新运行 `all`，只会执行未完成的部分
 - 单独重跑某个阶段不会覆盖已完成的任务
-- 如需强制重跑，删除 `pipeline_state.json` 中对应任务的对应阶段状态即可
+- prepare 阶段额外检查运行目录是否仍存在，清理后重跑会自动重新克隆
+- 如需强制重跑，使用 `python -m ctpipe reset --tasks CT-0001 --stages run collect` 重置指定阶段
 
 ---
 
@@ -413,12 +429,12 @@ passrate = sum(score_i × weight_i) / sum(points_i × weight_i)
 
 ## 并发与性能调优
 
-`tasks.toml` 中的 `max_parallel` 控制同时运行的任务数。每个任务内部 Qwen 和 Claude 并行执行，所以实际并发 `claude -p` 进程数 = `max_parallel × 2`。
+`tasks.toml` 中的 `max_parallel` 控制同时运行的 `claude -p` 进程数上限。每个任务内部 Qwen 和 Claude 并行执行（各占 1 个进程槽位），所以 `max_parallel=3` 意味着最多 3 个 `claude -p` 进程同时运行，通常可推进 1-2 个任务。
 
-| max_parallel | 并发进程 | 内存占用 | 建议 |
+| max_parallel | 并发进程 | 并发任务数 | 建议 |
 |:---:|:---:|:---:|:---:|
-| 3 | 6 | ~1.5GB | 8GB 内存 |
-| 5 | 10 | ~2.5GB | 16GB 内存 |
+| 3 | 3 | 1-2 | 8GB 内存 |
+| 6 | 6 | 3 | 16GB 内存 |
 
 瓶颈通常在 API 端限流而非本地资源。
 

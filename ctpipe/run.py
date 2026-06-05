@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ctpipe.config import BatchConfig, ModelConfig, TaskConfig, build_claude_env, select_tasks
+from ctpipe.config import (
+    BatchConfig,
+    ModelConfig,
+    TaskConfig,
+    build_claude_env,
+    select_delivery_tasks,
+)
 from ctpipe.state import PipelineState
 
 
@@ -23,7 +28,7 @@ class TurnResult:
     session_id: str = ""
 
 
-def _build_env(model_config: ModelConfig, http_proxy: str = "") -> dict[str, str]:
+def _build_env(model_config: ModelConfig) -> dict[str, str]:
     missing = []
     if not model_config.auth_token:
         missing.append("auth token")
@@ -33,7 +38,7 @@ def _build_env(model_config: ModelConfig, http_proxy: str = "") -> dict[str, str
         missing.append("model")
     if missing:
         raise ValueError(f"Model config is incomplete: missing {', '.join(missing)}")
-    return build_claude_env(model_config, http_proxy=http_proxy)
+    return build_claude_env(model_config)
 
 
 def _parse_session_id(stdout: str) -> str:
@@ -122,14 +127,13 @@ async def run_single(
     state: PipelineState,
     turn_timeout: int = 600,
     total_timeout: int = 1800,
-    http_proxy: str = "",
 ) -> dict[str, object]:
-    env = _build_env(model_config, http_proxy=http_proxy)
-    total_start = time.time()
+    env = _build_env(model_config)
     start_time = time.time()
     turns_completed = 0
     session_id = ""
     had_errors = False
+    error_count = 0
     all_results: list[dict[str, object]] = []
 
     print(f"  [{task.id}/{model_name}] Turn 1/{1 + len(followups)}: initial prompt...")
@@ -138,6 +142,8 @@ async def run_single(
     turns_completed = 1
     session_id = result.session_id
     had_errors = result.exit_code != 0
+    if result.exit_code != 0:
+        error_count += 1
 
     all_results.append({
         "turn": 1,
@@ -153,7 +159,7 @@ async def run_single(
             "status": "failed",
             "session_id": "",
             "turns": turns_completed,
-            "duration_s": round(time.time() - total_start, 1),
+            "duration_s": round(time.time() - start_time, 1),
             "start_time": start_time,
             "turns_detail": all_results,
             "error": error,
@@ -165,7 +171,7 @@ async def run_single(
         print(f"  [{task.id}/{model_name}] Turn 1 exited with {result.exit_code}; continuing with captured session")
 
     for index, followup in enumerate(followups, start=2):
-        elapsed = time.time() - total_start
+        elapsed = time.time() - start_time
         if elapsed >= total_timeout:
             print(f"  [{task.id}/{model_name}] Total timeout reached after {turns_completed} turns")
             break
@@ -183,9 +189,8 @@ async def run_single(
         result.turn = index
         turns_completed = index
         had_errors = had_errors or result.exit_code != 0
-
-        if result.session_id and not session_id:
-            session_id = result.session_id
+        if result.exit_code != 0:
+            error_count += 1
 
         all_results.append({
             "turn": index,
@@ -196,65 +201,65 @@ async def run_single(
         if result.exit_code != 0:
             print(f"  [{task.id}/{model_name}] Turn {index} failed (exit={result.exit_code}), continuing...")
 
-    total_duration = time.time() - total_start
+    total_duration = time.time() - start_time
+    all_turns_done = turns_completed == 1 + len(followups)
+    all_turns_errored = error_count == turns_completed
+    if all_turns_errored:
+        status = "failed"
+    elif all_turns_done:
+        status = "done"
+    else:
+        status = "partial"
     summary = {
-        "status": "done",
+        "status": status,
         "session_id": session_id,
         "turns": turns_completed,
+        "expected_turns": 1 + len(followups),
         "duration_s": round(total_duration, 1),
         "start_time": start_time,
         "turns_detail": all_results,
         "had_errors": had_errors,
     }
     state.set(task.id, "run", model=model_name, **summary)
-    print(f"  [{task.id}/{model_name}] Done: {turns_completed} turns in {total_duration:.0f}s")
+    label = "FAILED (all turns errored)" if all_turns_errored else f"Done: {turns_completed} turns"
+    print(f"  [{task.id}/{model_name}] {label} in {total_duration:.0f}s")
     return summary
 
 
-async def run_task_pair(
+async def run_task_model(
     task: TaskConfig,
     config: BatchConfig,
     state: PipelineState,
+    model_name: str,
     turn_timeout: int = 600,
     total_timeout: int = 1800,
-    models: list[str] | None = None,
 ) -> None:
-    models = models or ["qwen", "claude"]
-    coroutines = []
     prepare_info = state.get(task.id, "prepare")
+    if state.is_done(task.id, "run", model_name):
+        print(f"[{task.id}/{model_name}] run already done, skipping")
+        return
 
-    for model_name in models:
-        if state.is_done(task.id, "run", model_name):
-            print(f"[{task.id}/{model_name}] run already done, skipping")
-            continue
+    run_dir = Path(prepare_info.get(f"{model_name}_dir", ""))
+    if not run_dir.is_dir():
+        print(f"[{task.id}/{model_name}] ERROR: run dir not found: {run_dir}")
+        state.set(task.id, "run", model=model_name, status="failed", error="run dir not found")
+        return
 
-        run_dir = Path(prepare_info.get(f"{model_name}_dir", ""))
-        if not run_dir.is_dir():
-            print(f"[{task.id}/{model_name}] ERROR: run dir not found: {run_dir}")
-            state.set(task.id, "run", model=model_name, status="failed", error="run dir not found")
-            continue
+    model_config = config.qwen if model_name == "qwen" else config.claude
+    prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
+    followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
 
-        model_config = config.qwen if model_name == "qwen" else config.claude
-        prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
-        followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
-
-        coroutines.append(
-            run_single(
-                task,
-                model_name,
-                model_config,
-                run_dir,
-                prompt,
-                followups,
-                state,
-                turn_timeout,
-                total_timeout,
-                http_proxy=config.http_proxy,
-            )
-        )
-
-    if coroutines:
-        await asyncio.gather(*coroutines, return_exceptions=True)
+    await run_single(
+        task,
+        model_name,
+        model_config,
+        run_dir,
+        prompt,
+        followups,
+        state,
+        turn_timeout,
+        total_timeout,
+    )
 
 
 async def run_all(
@@ -265,13 +270,24 @@ async def run_all(
     total_timeout: int = 1800,
 ) -> None:
     state = PipelineState(config.delivery_dir / "pipeline_state.json")
-    tasks = select_tasks(config.tasks, task_ids)
+    tasks = select_delivery_tasks(config, task_ids)
+    models = models or ["qwen", "claude"]
     sem = asyncio.Semaphore(config.max_parallel)
 
-    async def bounded(task: TaskConfig) -> None:
+    async def run_model_bounded(task: TaskConfig, model_name: str) -> None:
         async with sem:
-            print(f"[{task.id}] Starting run...")
-            await run_task_pair(task, config, state, turn_timeout, total_timeout, models)
+            await run_task_model(task, config, state, model_name, turn_timeout, total_timeout)
 
-    await asyncio.gather(*(bounded(task) for task in tasks), return_exceptions=True)
+    async def run_task_models(task: TaskConfig) -> None:
+        print(f"[{task.id}] Starting run ({', '.join(models)})...")
+        coros = [run_model_bounded(task, m) for m in models]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for model_name, result in zip(models, results):
+            if isinstance(result, Exception):
+                print(f"[{task.id}/{model_name}] ERROR: {result}")
+                state.set(task.id, "run", model=model_name, status="failed", error=str(result))
+
+    task_coros = [run_task_models(task) for task in tasks]
+    if task_coros:
+        await asyncio.gather(*task_coros, return_exceptions=True)
     print("Run complete.")

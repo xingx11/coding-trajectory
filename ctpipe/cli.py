@@ -28,6 +28,7 @@ def main() -> int:
 
     p_collect = sub.add_parser("collect", help="Find and copy trajectory JSONL files")
     p_collect.add_argument("--tasks", nargs="*")
+    p_collect.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
 
     p_score = sub.add_parser("score", help="AI-generate initial quality scores")
     p_score.add_argument("--tasks", nargs="*")
@@ -35,11 +36,13 @@ def main() -> int:
 
     p_finalize = sub.add_parser("finalize", help="Calculate passrates and generate submission.csv")
     p_finalize.add_argument("--tasks", nargs="*")
+    p_finalize.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
 
     p_validate = sub.add_parser("validate", help="Validate delivery files and submission consistency")
     p_validate.add_argument("--tasks", nargs="*")
+    p_validate.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
 
-    p_gen = sub.add_parser("gen", help="Auto-generate tasks from GitHub projects")
+    p_gen = sub.add_parser("gen", help="Auto-generate tasks from GitHub/Gitee projects")
     p_gen.add_argument("--count", type=int, required=True, help="Number of tasks to generate")
     p_gen.add_argument("--domain", help="Filter by application domain")
     p_gen.add_argument("--language", help="Filter by programming language")
@@ -49,6 +52,7 @@ def main() -> int:
     p_gen.add_argument("--dry-run", action="store_true", help="Preview without cloning or writing")
     p_gen.add_argument("--gen-timeout", type=int, default=900, help="Total timeout per task generation in seconds (default: 900)")
     p_gen.add_argument("--per-project", type=int, default=1, help="Generate N tasks per project (default: 1). Use 3-4 to save time.")
+    p_gen.add_argument("--source", choices=["github", "gitee"], default="github", help="Project search source (default: github)")
 
     p_all = sub.add_parser("all", help="Run prepare -> run -> collect -> score -> finalize -> validate")
     p_all.add_argument("--tasks", nargs="*")
@@ -84,7 +88,7 @@ def main() -> int:
 
     elif args.command == "collect":
         from ctpipe.collect import collect_all
-        result = collect_all(config, args.tasks)
+        result = collect_all(config, args.tasks, args.models)
 
     elif args.command == "score":
         from ctpipe.score import score_all
@@ -92,11 +96,11 @@ def main() -> int:
 
     elif args.command == "finalize":
         from ctpipe.finalize import finalize
-        result = finalize(config, args.tasks)
+        result = finalize(config, args.tasks, args.models)
 
     elif args.command == "validate":
         from ctpipe.validate import validate
-        result = validate(config, args.tasks)
+        result = validate(config, args.tasks, args.models)
 
     elif args.command == "gen":
         from ctpipe.gen import generate
@@ -111,6 +115,7 @@ def main() -> int:
             dry_run=args.dry_run,
             total_timeout=args.gen_timeout,
             per_project=args.per_project,
+            source=args.source,
         ))
 
     elif args.command == "all":
@@ -144,13 +149,50 @@ def main() -> int:
 
 def _run_all_stages(config, args) -> bool:
     from ctpipe.collect import collect_all
+    from ctpipe.config import select_delivery_tasks
     from ctpipe.finalize import finalize
     from ctpipe.prepare import prepare
     from ctpipe.run import run_all
     from ctpipe.score import score_all
+    from ctpipe.state import PipelineState
     from ctpipe.validate import validate
 
+    def _check_stage(state: PipelineState, stage: str, models: list[str]) -> int:
+        tasks = select_delivery_tasks(config, args.tasks)
+        failed = 0
+        partial = 0
+        missing = 0
+        for task in tasks:
+            if stage in ("run", "collect", "score"):
+                for m in models:
+                    info = state.get(task.id, stage, m)
+                    status = info.get("status", "")
+                    if status == "failed":
+                        failed += 1
+                    elif status == "partial":
+                        partial += 1
+                    elif status in ("", "draft"):
+                        missing += 1
+            else:
+                info = state.get(task.id, stage)
+                status = info.get("status", "")
+                if status == "failed":
+                    failed += 1
+                elif status == "partial":
+                    partial += 1
+                elif status in ("", "draft"):
+                    missing += 1
+        if failed:
+            print(f"\n  WARNING: {failed} task(s) failed in {stage} stage")
+        if partial:
+            print(f"\n  WARNING: {partial} task(s) partially completed in {stage} stage")
+        if missing:
+            print(f"\n  WARNING: {missing} task(s) missing or incomplete in {stage} stage")
+        return failed + partial + missing
+
     async def _async_pipeline() -> None:
+        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+
         print("=" * 60)
         print("Stage 1/6: PREPARE")
         print("=" * 60)
@@ -160,25 +202,31 @@ def _run_all_stages(config, args) -> bool:
         print("Stage 2/6: RUN")
         print("=" * 60)
         await run_all(config, args.tasks, args.models, args.turn_timeout, args.total_timeout)
+        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        _check_stage(state, "run", args.models)
 
         print("\n" + "=" * 60)
         print("Stage 3/6: COLLECT")
         print("=" * 60)
-        collect_all(config, args.tasks)
+        collect_all(config, args.tasks, args.models)
+        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        _check_stage(state, "collect", args.models)
 
         print("\n" + "=" * 60)
         print("Stage 4/6: SCORE")
         print("=" * 60)
         await score_all(config, args.tasks, args.models)
+        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        _check_stage(state, "score", args.models)
 
         print("\n" + "=" * 60)
         print("Stage 5/6: FINALIZE")
         print("=" * 60)
-        finalize(config, args.tasks)
+        finalize(config, args.tasks, args.models)
 
     asyncio.run(_async_pipeline())
 
     print("\n" + "=" * 60)
     print("Stage 6/6: VALIDATE")
     print("=" * 60)
-    return validate(config, args.tasks)
+    return validate(config, args.tasks, args.models)
