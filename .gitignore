@@ -49,3 +49,10 @@ delivery_*/
 # Generated rubric templates (created by `ctpipe gen`)
 rubrics_templates/qwen/CT-*.toml
 rubrics_templates/claude/CT-*.toml
+
+# Output files
+score.txt
+*.pdf
+
+# Scripts with internal URLs
+scripts/

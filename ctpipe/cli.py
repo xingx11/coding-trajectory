@@ -23,12 +23,14 @@ def main() -> int:
     p_run = sub.add_parser("run", help="Execute claude -p for each task and model")
     p_run.add_argument("--tasks", nargs="*", help="Specific task IDs")
     p_run.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
-    p_run.add_argument("--turn-timeout", type=int, default=600, help="Timeout per turn in seconds")
-    p_run.add_argument("--total-timeout", type=int, default=1800, help="Total timeout per task and model in seconds")
+    p_run.add_argument("--turn-timeout", type=int, default=900, help="Timeout per turn in seconds")
+    p_run.add_argument("--total-timeout", type=int, default=3600, help="Total timeout per task and model in seconds")
 
     p_collect = sub.add_parser("collect", help="Find and copy trajectory JSONL files")
     p_collect.add_argument("--tasks", nargs="*")
     p_collect.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_collect.add_argument("--no-salvage", action="store_true", help="Skip salvaging from interrupted runs")
+    p_collect.add_argument("--force", action="store_true", help="Skip start_time/session_id validation, pick newest trajectory by mtime")
 
     p_score = sub.add_parser("score", help="AI-generate initial quality scores")
     p_score.add_argument("--tasks", nargs="*")
@@ -50,6 +52,8 @@ def main() -> int:
     p_gen.add_argument("--from-local", help="Use a local project path instead of searching GitHub")
     p_gen.add_argument("--clone-dir", help="Directory to clone projects into (default: runs_root)")
     p_gen.add_argument("--dry-run", action="store_true", help="Preview without cloning or writing")
+    p_gen.add_argument("--clone-only", action="store_true", help="Only search and clone repos (skip AI task generation)")
+    p_gen.add_argument("--analyze", action="store_true", help="Use Claude Code to analyze a local project and write task entries directly")
     p_gen.add_argument("--gen-timeout", type=int, default=900, help="Total timeout per task generation in seconds (default: 900)")
     p_gen.add_argument("--per-project", type=int, default=1, help="Generate N tasks per project (default: 1). Use 3-4 to save time.")
     p_gen.add_argument("--source", choices=["github", "gitee"], default="github", help="Project search source (default: github)")
@@ -57,8 +61,8 @@ def main() -> int:
     p_all = sub.add_parser("all", help="Run prepare -> run -> collect -> score -> finalize -> validate")
     p_all.add_argument("--tasks", nargs="*")
     p_all.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
-    p_all.add_argument("--turn-timeout", type=int, default=600)
-    p_all.add_argument("--total-timeout", type=int, default=1800)
+    p_all.add_argument("--turn-timeout", type=int, default=900)
+    p_all.add_argument("--total-timeout", type=int, default=3600)
 
     p_reset = sub.add_parser("reset", help="Reset pipeline state for specific tasks/stages to allow re-runs")
     p_reset.add_argument("--tasks", nargs="+", required=True, help="Task IDs to reset")
@@ -67,6 +71,22 @@ def main() -> int:
                          help="Pipeline stages to reset")
     p_reset.add_argument("--models", nargs="*", choices=["qwen", "claude"],
                          help="Reset only specific models (default: both)")
+
+    p_check = sub.add_parser("check", help="Deep validation: turns, models, sessions, scores, thresholds")
+    p_check.add_argument("--tasks", nargs="*")
+    p_check.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+
+    p_stats = sub.add_parser("stats", help="Show pipeline stage statistics")
+    p_stats.add_argument("--tasks", nargs="*")
+    p_stats.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_stats.add_argument("--format", choices=["table", "json"], default="table", dest="fmt")
+
+    p_clean = sub.add_parser("clean", help="Post-delivery cleanup of runs, cache, and old deliveries")
+    p_clean.add_argument("--tasks", nargs="*", help="Only clean specific task IDs")
+    p_clean.add_argument("--no-runs", action="store_true", help="Skip cleaning runs/ directories")
+    p_clean.add_argument("--cache", action="store_true", help="Also clean ~/.claude/projects/ JSONL cache")
+    p_clean.add_argument("--old-deliveries", action="store_true", help="Also remove old delivery_* directories")
+    p_clean.add_argument("--dry-run", action="store_true", help="Preview what would be deleted")
 
     args = parser.parse_args()
     base_dir = Path(__file__).resolve().parent.parent
@@ -88,7 +108,7 @@ def main() -> int:
 
     elif args.command == "collect":
         from ctpipe.collect import collect_all
-        result = collect_all(config, args.tasks, args.models)
+        result = collect_all(config, args.tasks, args.models, salvage=not args.no_salvage, force=args.force)
 
     elif args.command == "score":
         from ctpipe.score import score_all
@@ -113,6 +133,8 @@ def main() -> int:
             from_local=args.from_local,
             clone_dir=Path(args.clone_dir) if args.clone_dir else None,
             dry_run=args.dry_run,
+            clone_only=args.clone_only,
+            analyze=args.analyze,
             total_timeout=args.gen_timeout,
             per_project=args.per_project,
             source=args.source,
@@ -120,6 +142,26 @@ def main() -> int:
 
     elif args.command == "all":
         result = _run_all_stages(config, args)
+
+    elif args.command == "check":
+        from ctpipe.check import check
+        result = check(config, args.tasks, args.models)
+
+    elif args.command == "stats":
+        from ctpipe.stats import show_stats
+        result = show_stats(config, args.tasks, args.models, args.fmt)
+
+    elif args.command == "clean":
+        from ctpipe.clean import clean
+        clean(
+            config,
+            task_ids=args.tasks,
+            runs=not args.no_runs,
+            cache=args.cache,
+            old_deliveries=args.old_deliveries,
+            dry_run=args.dry_run,
+        )
+        result = 0
 
     elif args.command == "reset":
         from ctpipe.state import PipelineState
@@ -202,21 +244,21 @@ def _run_all_stages(config, args) -> bool:
         print("Stage 2/6: RUN")
         print("=" * 60)
         await run_all(config, args.tasks, args.models, args.turn_timeout, args.total_timeout)
-        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        state.reload()
         _check_stage(state, "run", args.models)
 
         print("\n" + "=" * 60)
         print("Stage 3/6: COLLECT")
         print("=" * 60)
         collect_all(config, args.tasks, args.models)
-        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        state.reload()
         _check_stage(state, "collect", args.models)
 
         print("\n" + "=" * 60)
         print("Stage 4/6: SCORE")
         print("=" * 60)
         await score_all(config, args.tasks, args.models)
-        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        state.reload()
         _check_stage(state, "score", args.models)
 
         print("\n" + "=" * 60)
@@ -224,9 +266,19 @@ def _run_all_stages(config, args) -> bool:
         print("=" * 60)
         finalize(config, args.tasks, args.models)
 
-    asyncio.run(_async_pipeline())
+    pipeline_error: Exception | None = None
+    try:
+        asyncio.run(_async_pipeline())
+    except Exception as exc:
+        pipeline_error = exc
+        print(f"\nERROR in pipeline: {exc}")
 
     print("\n" + "=" * 60)
     print("Stage 6/6: VALIDATE")
     print("=" * 60)
-    return validate(config, args.tasks, args.models)
+    valid = validate(config, args.tasks, args.models)
+
+    if pipeline_error:
+        print(f"\nWARNING: pipeline had errors before validate: {pipeline_error}")
+        return False
+    return valid

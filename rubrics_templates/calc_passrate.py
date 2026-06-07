@@ -16,7 +16,7 @@ def calc_passrate(path: Path) -> float:
     total_points = 0.0
     for item in criteria:
         score = float(item.get("score", 0))
-        points = float(item.get("points", 1))
+        points = float(item.get("points", 5))
         weight = float(item.get("weight", 1))
         total_score += score * weight
         total_points += points * weight

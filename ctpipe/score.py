@@ -11,7 +11,7 @@ from ctpipe.state import PipelineState
 from ctpipe.toml_utils import Criterion, calc_passrate, read_quality_toml, write_quality_toml
 from ctpipe.trajectory import extract_for_scoring
 
-SCORING_SYSTEM_PROMPT = """You are reviewing a coding-assistant trajectory and filling a quality rubric.
+SCORING_SYSTEM_PROMPT = """You are a human reviewer evaluating a coding-assistant trajectory against a quality rubric.
 
 You will receive:
 1. A TOML scoring template.
@@ -19,7 +19,7 @@ You will receive:
 
 Instructions:
 - Score each criterion from 0 to 5 as an integer.
-- Write the rationale in Chinese.
+- Write the rationale in Chinese — casual, natural tone, like a senior engineer jotting notes.
 - Keep `name`, `description`, `type`, `points`, and `weight` unchanged.
 - Only modify `score` and `rationale`.
 - Output TOML only. Do not wrap it in Markdown.
@@ -31,6 +31,25 @@ Scoring guidance:
 - 2: superficial implementation, important requirements missing
 - 1: little meaningful progress
 - 0: wrong direction, failed badly, or no attempt
+
+Rationale writing rules (CRITICAL — follow strictly):
+- Write like a real person reviewing code, NOT like an AI generating reports.
+- Reference SPECIFIC actions from the trajectory: which files were edited, what commands ran, what errors occurred, what was missed.
+- Each rationale MUST be unique — never repeat the same sentence across criteria.
+- FORBIDDEN patterns (do NOT use these):
+  × "整体看，XXX有一些有效推进，但稳定性和完整性不够"
+  × "这项给X分比较稳/更贴近实际"
+  × "XXX在CT-XXXX这个XXX任务里，XX这一项主要看的是..."
+  × "这个分数反映的是…" / "因此给低中档分数" / "所以给中档分"
+  × Any formulaic opening like "我会给这一项X分"
+- Good rationale examples:
+  ✓ "改了三个文件但漏掉了edge case的单元测试，validate那步直接跳过了"
+  ✓ "prompt里要求加日志，它确实加了logging，但log level全用的INFO，没按要求区分WARNING"
+  ✓ "看到它先读了README再动手改，思路还行，不过改完没跑测试就结束了"
+  ✓ "这块做得不错，把原来的硬编码换成了配置项，还顺手补了类型注解"
+- Keep each rationale 1-3 sentences, concise and specific.
+- Do NOT mention the task ID (CT-XXXX) or task type in rationales.
+- Do NOT compare with the other model (qwen vs claude) in rationales.
 """
 
 
@@ -52,7 +71,6 @@ async def _call_scoring_ai(
     cmd = [
         "claude",
         "-p",
-        user_prompt,
         "--output-format",
         "text",
         "--dangerously-skip-permissions",
@@ -65,11 +83,15 @@ async def _call_scoring_ai(
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         env=env,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=user_prompt.encode("utf-8")),
+            timeout=timeout,
+        )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
@@ -156,16 +178,31 @@ async def score_single(
     trajectory_text = extract_for_scoring(jsonl_path)
     print(f"  [{task.id}/{model_name}] Trajectory: {len(trajectory_text)} chars")
 
-    print(f"  [{task.id}/{model_name}] Calling AI for scoring...")
-    raw_output = await _call_scoring_ai(trajectory_text, template_text, env, model=config.claude.model)
-
-    if not raw_output:
-        print(f"  [{task.id}/{model_name}] ERROR: empty AI response")
-        state.set(task.id, "score", model=model_name, status="failed", error="empty response")
-        return False
-
-    scored = _parse_scored_toml(raw_output, template_criteria)
+    max_attempts = 2
+    raw_output = ""
+    scored = None
     output_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+
+    for attempt in range(1, max_attempts + 1):
+        retry_hint = "" if attempt == 1 else " Output valid TOML only, no markdown fences or extra text."
+        print(f"  [{task.id}/{model_name}] Calling AI for scoring (attempt {attempt}/{max_attempts})...")
+        raw_output = await _call_scoring_ai(
+            trajectory_text, template_text + retry_hint, env, model=config.claude.model,
+        )
+
+        if not raw_output:
+            if attempt < max_attempts:
+                print(f"  [{task.id}/{model_name}] Empty response, retrying...")
+                continue
+            print(f"  [{task.id}/{model_name}] ERROR: empty AI response after {max_attempts} attempts")
+            state.set(task.id, "score", model=model_name, status="failed", error="empty response")
+            return False
+
+        scored = _parse_scored_toml(raw_output, template_criteria)
+        if scored is not None:
+            break
+        if attempt < max_attempts:
+            print(f"  [{task.id}/{model_name}] Parse failed, retrying...")
 
     if scored is None:
         draft_path = output_path.with_suffix(".draft.txt")
@@ -195,23 +232,28 @@ async def score_all(
         async with sem:
             await score_single(task, model_name, config, state, env)
 
+    env = _build_scoring_env(config)
     coros = []
     task_models: list[tuple[str, str]] = []
     for task in tasks:
         for model_name in models:
             if state.is_done(task.id, "score", model_name):
-                print(f"[{task.id}/{model_name}] score already done, skipping")
-                continue
+                score_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+                if score_path.exists():
+                    print(f"[{task.id}/{model_name}] score already done, skipping")
+                    continue
+                print(f"[{task.id}/{model_name}] score marked done but file missing, re-scoring...")
+                state.reset(task.id, "score", model_name)
             print(f"[{task.id}/{model_name}] Scoring trajectory...")
             coros.append(bounded(task, model_name))
             task_models.append((task.id, model_name))
 
     if coros:
-        env = _build_scoring_env(config)
-        results = await asyncio.gather(*coros, return_exceptions=True)
-        for task_model, result in zip(task_models, results):
-            if isinstance(result, Exception):
-                task_id, model_name = task_model
-                print(f"[{task_id}/{model_name}] ERROR: {result}")
-                state.set(task_id, "score", model=model_name, status="failed", error=str(result))
+        with state.batch():
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            for task_model, result in zip(task_models, results):
+                if isinstance(result, Exception):
+                    task_id, model_name = task_model
+                    print(f"[{task_id}/{model_name}] ERROR: {result}")
+                    state.set(task_id, "score", model=model_name, status="failed", error=str(result))
     print("Score complete.")

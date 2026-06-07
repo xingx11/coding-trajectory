@@ -16,6 +16,7 @@ from ctpipe.config import (
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
+from ctpipe.trajectory import find_trajectory_for_run, parse_trajectory
 
 
 @dataclass
@@ -68,7 +69,7 @@ async def _run_claude_p(
     cwd: Path,
     model: str | None = None,
     resume_session: str | None = None,
-    timeout: int = 600,
+    timeout: int = 900,
 ) -> TurnResult:
     cmd = [
         "claude",
@@ -92,11 +93,24 @@ async def _run_claude_p(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+
+    async def _heartbeat():
+        while True:
+            await asyncio.sleep(30)
+            elapsed = int(time.time() - started_at)
+            print(f"    ... still running ({elapsed}s elapsed)")
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         return TurnResult(
             turn=0,
             exit_code=-1,
@@ -104,6 +118,11 @@ async def _run_claude_p(
             stderr="TIMEOUT",
             duration_s=time.time() - started_at,
         )
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -125,8 +144,8 @@ async def run_single(
     prompt: str,
     followups: list[str],
     state: PipelineState,
-    turn_timeout: int = 600,
-    total_timeout: int = 1800,
+    turn_timeout: int = 900,
+    total_timeout: int = 3600,
 ) -> dict[str, object]:
     env = _build_env(model_config)
     start_time = time.time()
@@ -144,6 +163,16 @@ async def run_single(
     had_errors = result.exit_code != 0
     if result.exit_code != 0:
         error_count += 1
+
+    # Fallback: if session_id empty (e.g. timeout killed the process),
+    # try recovering from the JSONL file Claude Code already wrote to disk.
+    if not session_id:
+        traj_path = find_trajectory_for_run(run_dir, start_time)
+        if traj_path:
+            traj_info = parse_trajectory(traj_path)
+            if traj_info.session_id:
+                session_id = traj_info.session_id
+                print(f"  [{task.id}/{model_name}] Recovered session_id from disk: {session_id}")
 
     all_results.append({
         "turn": 1,
@@ -206,10 +235,10 @@ async def run_single(
     all_turns_errored = error_count == turns_completed
     if all_turns_errored:
         status = "failed"
-    elif all_turns_done:
-        status = "done"
-    else:
+    elif not all_turns_done or had_errors:
         status = "partial"
+    else:
+        status = "done"
     summary = {
         "status": status,
         "session_id": session_id,
@@ -231,8 +260,8 @@ async def run_task_model(
     config: BatchConfig,
     state: PipelineState,
     model_name: str,
-    turn_timeout: int = 600,
-    total_timeout: int = 1800,
+    turn_timeout: int = 900,
+    total_timeout: int = 3600,
 ) -> None:
     prepare_info = state.get(task.id, "prepare")
     if state.is_done(task.id, "run", model_name):
@@ -266,8 +295,8 @@ async def run_all(
     config: BatchConfig,
     task_ids: list[str] | None = None,
     models: list[str] | None = None,
-    turn_timeout: int = 600,
-    total_timeout: int = 1800,
+    turn_timeout: int = 900,
+    total_timeout: int = 3600,
 ) -> None:
     state = PipelineState(config.delivery_dir / "pipeline_state.json")
     tasks = select_delivery_tasks(config, task_ids)
@@ -280,14 +309,25 @@ async def run_all(
 
     async def run_task_models(task: TaskConfig) -> None:
         print(f"[{task.id}] Starting run ({', '.join(models)})...")
-        coros = [run_model_bounded(task, m) for m in models]
-        results = await asyncio.gather(*coros, return_exceptions=True)
-        for model_name, result in zip(models, results):
-            if isinstance(result, Exception):
-                print(f"[{task.id}/{model_name}] ERROR: {result}")
-                state.set(task.id, "run", model=model_name, status="failed", error=str(result))
+        with state.batch():
+            coros = [run_model_bounded(task, m) for m in models]
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            for model_name, result in zip(models, results):
+                if isinstance(result, Exception):
+                    print(f"[{task.id}/{model_name}] ERROR: {result}")
+                    state.set(task.id, "run", model=model_name, status="failed", error=str(result))
 
     task_coros = [run_task_models(task) for task in tasks]
     if task_coros:
-        await asyncio.gather(*task_coros, return_exceptions=True)
+        batch_size = max(1, config.max_parallel)
+        for i in range(0, len(task_coros), batch_size):
+            batch = task_coros[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            total_batches = (len(task_coros) + batch_size - 1) // batch_size
+            if total_batches > 1:
+                print(f"\n--- Batch {batch_num}/{total_batches} ---")
+            results = await asyncio.gather(*batch, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    print(f"  ERROR in batch: {result}")
     print("Run complete.")

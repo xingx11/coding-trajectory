@@ -16,7 +16,7 @@ from ctpipe.distribution import DISTRIBUTION, TaskSlot, expand_slot_for_batch, s
 
 VALID_TASK_TYPES = {slot.task_type for slot in DISTRIBUTION}
 from ctpipe.github_search import search_and_clone, search_and_clone_gitee
-from ctpipe.toml_utils import Criterion, write_quality_toml
+from ctpipe.toml_utils import Criterion, _escape_toml_multiline, write_quality_toml
 
 CRITERIA_NAMES = [
     "user_experience_and_interaction",
@@ -38,19 +38,30 @@ SCAN_IGNORE_SUFFIXES = {".egg-info"}
 
 IDEA_PROMPT = """You are a coding-task designer. Propose ONE realistic coding task for this project.
 Requirements: realistic, requires cross-file understanding, clear acceptance criteria.
+IMPORTANT: task_title and task_description MUST be written in Chinese (简体中文).
 Return ONLY valid JSON (no markdown):
-{"task_title": "short title", "task_description": "2-3 sentences", "key_files": ["file1"], "acceptance_criteria": ["c1", "c2"]}"""
+{"task_title": "简短中文标题", "task_description": "2-3句中文描述", "key_files": ["file1"], "acceptance_criteria": ["c1", "c2"]}"""
 
 MULTI_IDEA_PROMPT = """You are a coding-task designer. Propose {count} DISTINCT coding tasks for this project.
 Each task must match the type assigned in its spec below. Tasks with the same type must still be distinct tasks.
 Requirements: realistic, requires cross-file understanding, clear acceptance criteria.
+IMPORTANT: task_title and task_description MUST be written in Chinese (简体中文).
 Return ONLY a valid JSON array (no markdown):
-[{{"task_title": "title", "task_description": "desc", "task_type": "type", "key_files": ["f1"], "acceptance_criteria": ["c1"]}}]"""
+[{{"task_title": "中文标题", "task_description": "中文描述", "task_type": "type", "key_files": ["f1"], "acceptance_criteria": ["c1"]}}]"""
 
 
 EXPAND_PROMPT = """Expand this task idea into a full specification.
-Rules: prompts start with "You are working in a local project directory. Read the relevant code before changing anything. Do not commit, and do not write tokens or secrets into files."
-prompt_qwen/prompt_claude: same task, may differ in phrasing. followups_qwen: 2-3 items. followups_claude: 4-5 items. criteria_descriptions: exactly 7, each starting with "Evaluates whether".
+
+CRITICAL — Language & style rules for prompt_qwen, prompt_claude, followups_qwen, followups_claude:
+1. ALL prompts and followups MUST be written in Chinese (简体中文).
+2. Write them as a real human developer would type into an AI coding assistant — short, casual, natural.
+3. The initial prompt (prompt_qwen / prompt_claude) should be ONE short sentence describing the overall goal, like a developer's first message. Examples: "帮我给这个项目加一个命令行状态查看功能", "这个项目有个并发 bug，帮我修一下". Do NOT include long requirement lists in the initial prompt.
+4. followups are progressive refinements — each one asks for ONE specific next step, building on what the previous prompt/followup asked for. They should read like a natural conversation: "现在加上颜色显示", "再写几个测试", "处理一下边界情况". Keep each followup to 1-2 short sentences max.
+5. prompt_qwen and prompt_claude describe the same task but may be phrased slightly differently. followups_qwen: 2-3 items. followups_claude: 4-5 items.
+6. Do NOT start prompts with boilerplate like "你正在一个本地项目目录中工作" or any formulaic prefix. Just state the request directly.
+7. The progressive flow should be: initial prompt = broad goal → followup 1 = core implementation detail → followup 2 = enhancement or edge case → followup 3+ = testing, polish, docs.
+
+criteria_descriptions: exactly 7, each starting with "Evaluates whether".
 Criteria: user_experience_and_interaction, task_planning_and_execution_control, semantic_understanding_and_logical_reasoning, instruction_compliance_and_constraint_adherence, engineering_quality_and_completeness, delivery_completeness_and_usability, architecture_boundaries_and_security_compliance.
 Return ONLY valid JSON (no markdown):
 {"prompt_qwen":"...","prompt_claude":"...","followups_qwen":["..."],"followups_claude":["..."],"criteria_descriptions":["Evaluates whether ..."]}"""
@@ -353,12 +364,7 @@ def _write_rubric_templates(
 
 def _escape_toml_ml(s: str) -> str:
     """Escape a string for TOML multi-line basic string."""
-    s = s.replace("\\", "\\\\")
-    while '"""' in s:
-        s = s.replace('"""', '""\\"')
-    if s.endswith('"'):
-        s = s[:-1] + '\\"'
-    return s
+    return _escape_toml_multiline(s)
 
 
 def _format_toml_entry(
@@ -814,6 +820,169 @@ async def generate_batch(
     return successes
 
 
+async def _clone_only_run(
+    sampled: list[tuple[int, TaskSlot]],
+    config: BatchConfig,
+    clone_dir: Path,
+    used_repos: set[str],
+    state_path: Path,
+    dry_run: bool = False,
+    source: str = "github",
+) -> int:
+    """Search and clone repos without AI task generation."""
+    groups: dict[tuple[str, str], TaskSlot] = {}
+    for _, slot in sampled:
+        key = (slot.domain, slot.language)
+        if key not in groups:
+            groups[key] = slot
+
+    print(f"\nClone-only mode: {len(groups)} unique (domain, language) groups")
+    print(f"  clone_dir={clone_dir}, source={source}, proxy={config.http_proxy or 'none'}")
+
+    if dry_run:
+        print("\n[dry-run] Would search and clone:")
+        for i, ((dom, lang), slot) in enumerate(groups.items(), 1):
+            print(f"  {i}. {dom} / {lang}")
+        return 0
+
+    cloned: list[dict[str, str]] = []
+    for (dom, lang), slot in groups.items():
+        print(f"\n  Searching {source} for {dom}/{lang} projects...")
+        if source == "gitee":
+            result = await asyncio.to_thread(
+                search_and_clone_gitee, dom, lang, "_projects", clone_dir,
+                used_repos, config.gitee_token, config.http_proxy,
+            )
+        else:
+            result = await asyncio.to_thread(
+                search_and_clone, dom, lang, "_projects", clone_dir,
+                used_repos, config.github_token, config.http_proxy,
+            )
+        if result:
+            repo, project_path = result
+            used_repos.add(repo.full_name)
+            _save_used_repo(state_path, repo.full_name)
+            cloned.append({
+                "repo": repo.full_name,
+                "path": str(project_path),
+                "domain": dom,
+                "language": lang,
+            })
+            print(f"  OK: {repo.full_name} -> {project_path}")
+        else:
+            print(f"  FAILED: no repo found for {dom}/{lang}")
+
+    if cloned:
+        manifest_path = clone_dir / "_cloned_repos.json"
+        existing: list[dict[str, str]] = []
+        if manifest_path.exists():
+            try:
+                existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        existing_paths = {e["path"] for e in existing}
+        for entry in cloned:
+            if entry["path"] not in existing_paths:
+                existing.append(entry)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        print(f"\n{'=' * 60}")
+        print(f"Cloned {len(cloned)}/{len(groups)} repos:")
+        for i, entry in enumerate(cloned, 1):
+            print(f"  {i}. {entry['repo']} -> {entry['path']} ({entry['domain']} / {entry['language']})")
+        print(f"\nManifest: {manifest_path}")
+        print(f"\nTo generate tasks from a cloned repo:")
+        print(f'  python -m ctpipe gen --from-local "{cloned[0]["path"]}" --count 3')
+    else:
+        print(f"\n{'=' * 60}")
+        print("No repos cloned successfully.")
+
+    return 0 if cloned else 1
+
+
+async def _analyze_local(
+    sampled: list[tuple[int, TaskSlot]],
+    config: BatchConfig,
+    project_path: Path,
+    dry_run: bool = False,
+    total_timeout: int = 900,
+) -> int:
+    """Analyze a local project via Claude Code and write task entries directly."""
+    if not project_path.is_dir():
+        print(f"ERROR: project path not found: {project_path}")
+        return 1
+
+    template_path = config.docs_dir / "analyze_prompt_template.md"
+    if not template_path.exists():
+        print(f"ERROR: prompt template not found: {template_path}")
+        return 1
+
+    template = template_path.read_text(encoding="utf-8")
+
+    start_id = _next_task_id(config)
+    m = re.match(r"CT-(\d+)", start_id)
+    if not m:
+        print(f"ERROR: invalid task ID format: {start_id}")
+        return 1
+    start_num = int(m.group(1))
+    count = len(sampled)
+    task_ids = [f"CT-{start_num + i:04d}" for i in range(count)]
+
+    slots_text = "\n".join(
+        f"  {i+1}. task_type={slot.task_type}, domain={slot.domain}, language={slot.language}"
+        for i, (_, slot) in enumerate(sampled)
+    )
+
+    project_path_escaped = str(project_path).replace("\\", "\\\\")
+    tasks_toml_path = str(config.base_dir / "tasks.toml").replace("\\", "\\\\")
+    rubrics_dir = str(config.rubrics_dir).replace("\\", "\\\\")
+
+    prompt = template
+    prompt = prompt.replace("{{COUNT}}", str(count))
+    prompt = prompt.replace("{{SLOTS}}", slots_text)
+    prompt = prompt.replace("{{PROJECT_PATH_ESCAPED}}", project_path_escaped)
+    prompt = prompt.replace("{{TASKS_TOML_PATH}}", tasks_toml_path)
+    prompt = prompt.replace("{{RUBRICS_DIR}}", rubrics_dir)
+    prompt = prompt.replace("{{TASK_IDS}}", ", ".join(task_ids))
+
+    if dry_run:
+        print(f"\n[dry-run] Rendered prompt ({len(prompt)} chars):")
+        print("=" * 60)
+        print(prompt)
+        print("=" * 60)
+        print(f"\nTask IDs: {', '.join(task_ids)}")
+        print(f"Project: {project_path}")
+        print(f"tasks.toml: {config.base_dir / 'tasks.toml'}")
+        print(f"Rubrics: {config.rubrics_dir}")
+        return 0
+
+    env = _build_gen_env(config)
+    print(f"\n[analyze] Project: {project_path}")
+    print(f"[analyze] Task IDs: {', '.join(task_ids)}")
+    print(f"[analyze] Calling Claude Code to analyze and generate tasks...")
+
+    result = await _call_claude_p(prompt, env, model=config.claude.model, timeout=total_timeout)
+
+    if not result:
+        print("[analyze] ERROR: empty response (timeout or error)")
+        return 1
+
+    ok_count = 0
+    for tid in task_ids:
+        qwen_rubric = config.rubrics_dir / "qwen" / f"{tid}.quality.toml"
+        claude_rubric = config.rubrics_dir / "claude" / f"{tid}.quality.toml"
+        if qwen_rubric.exists() and claude_rubric.exists():
+            ok_count += 1
+            print(f"  [{tid}] rubric files OK")
+        else:
+            print(f"  [{tid}] WARNING: rubric files missing")
+
+    print(f"\n[analyze] Done: {ok_count}/{count} tasks have rubric files")
+    print(f"[analyze] Check tasks.toml for the new [[task]] entries")
+    return 0
+
+
 async def generate(
     config: BatchConfig,
     count: int,
@@ -823,6 +992,8 @@ async def generate(
     from_local: str | None = None,
     clone_dir: Path | None = None,
     dry_run: bool = False,
+    clone_only: bool = False,
+    analyze: bool = False,
     total_timeout: int = 900,
     per_project: int = 1,
     source: str = "github",
@@ -847,15 +1018,25 @@ async def generate(
     for i, (idx, slot) in enumerate(sampled, 1):
         print(f"  {i}. [{idx}] {slot.task_type} / {slot.domain} / {slot.language} (w={slot.weight})")
 
-    env = _build_gen_env(config)
     effective_clone_dir = clone_dir or config.runs_root
+
+    if clone_only:
+        return await _clone_only_run(sampled, config, effective_clone_dir, used_repos, state_path, dry_run, source)
+
+    if analyze:
+        if not from_local:
+            print("ERROR: --analyze requires --from-local <path>")
+            return 1
+        return await _analyze_local(sampled, config, Path(from_local), dry_run, total_timeout)
+
+    env = _build_gen_env(config)
 
     base_url = config.claude.base_url
     model = config.claude.model
-    proxy = env.get("HTTPS_PROXY", "") or env.get("HTTP_PROXY", "")
+    proxy = config.http_proxy
     has_key = bool(config.claude.auth_token)
     print(f"\nConfig: model={model}, base_url={base_url[:60]}{'...' if len(base_url) > 60 else ''}")
-    print(f"  auth_token={'set' if has_key else 'MISSING'}, proxy={proxy or 'none'}, no_proxy={env.get('NO_PROXY', 'none')}")
+    print(f"  auth_token={'set' if has_key else 'MISSING'}, proxy={proxy or 'none'}")
     print(f"  clone_dir={effective_clone_dir}, total_timeout={total_timeout}s, per_project={per_project}")
 
     start_id = _next_task_id(config)

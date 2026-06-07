@@ -217,8 +217,13 @@ def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
                 print(f"[{task.id}] prepare marked done but directories missing, re-cloning...")
 
             print(f"[{task.id}] Cloning project for qwen and claude...")
-            qwen_dir = _clone_project(task, "qwen", config.runs_root)
-            claude_dir = _clone_project(task, "claude", config.runs_root)
+            try:
+                qwen_dir = _clone_project(task, "qwen", config.runs_root)
+                claude_dir = _clone_project(task, "claude", config.runs_root)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                print(f"[{task.id}] ERROR: clone failed: {exc}")
+                state.set(task.id, "prepare", status="failed", error=str(exc))
+                continue
             _create_metadata_stub(config, task)
 
             state.set(

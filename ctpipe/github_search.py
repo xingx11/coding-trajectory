@@ -473,7 +473,7 @@ def search_and_clone_gitee(
         return None
 
     for repo in repos:
-        path = clone_project(repo, dest_root, task_id, http_proxy="")
+        path = clone_project(repo, dest_root, task_id, http_proxy=http_proxy)
         if path:
             return repo, path
         time.sleep(1)

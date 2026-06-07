@@ -1,11 +1,11 @@
-﻿id,qwen 本地trajectory,qwen session id,qwen rubrics 人工评分,claude 本地trajectory,claude session id,claude rubrics 人工评分,qwen passrate,claude passrate,任务类型,应用领域,编程语言
-CT-0001,trajectories/qwen/CT-0001.jsonl,,scores/qwen/CT-0001.quality.toml,trajectories/claude/CT-0001.jsonl,,scores/claude/CT-0001.quality.toml,,,bug-fix,web_frontend,ts
-CT-0002,trajectories/qwen/CT-0002.jsonl,,scores/qwen/CT-0002.quality.toml,trajectories/claude/CT-0002.jsonl,,scores/claude/CT-0002.quality.toml,,,bug-fix,backend_service,python
-CT-0003,trajectories/qwen/CT-0003.jsonl,,scores/qwen/CT-0003.quality.toml,trajectories/claude/CT-0003.jsonl,,scores/claude/CT-0003.quality.toml,,,feature,web_frontend,ts
-CT-0004,trajectories/qwen/CT-0004.jsonl,,scores/qwen/CT-0004.quality.toml,trajectories/claude/CT-0004.jsonl,,scores/claude/CT-0004.quality.toml,,,bug-fix,web_frontend,ts
-CT-0005,trajectories/qwen/CT-0005.jsonl,,scores/qwen/CT-0005.quality.toml,trajectories/claude/CT-0005.jsonl,,scores/claude/CT-0005.quality.toml,,,feature,backend_service,python
-CT-0006,trajectories/qwen/CT-0006.jsonl,,scores/qwen/CT-0006.quality.toml,trajectories/claude/CT-0006.jsonl,,scores/claude/CT-0006.quality.toml,,,performance-fix,devtools_test,python
-CT-0007,trajectories/qwen/CT-0007.jsonl,,scores/qwen/CT-0007.quality.toml,trajectories/claude/CT-0007.jsonl,,scores/claude/CT-0007.quality.toml,,,enhancement,web_frontend,js
-CT-0008,trajectories/qwen/CT-0008.jsonl,,scores/qwen/CT-0008.quality.toml,trajectories/claude/CT-0008.jsonl,,scores/claude/CT-0008.quality.toml,,,feature,web_frontend,ts
-CT-0009,trajectories/qwen/CT-0009.jsonl,,scores/qwen/CT-0009.quality.toml,trajectories/claude/CT-0009.jsonl,,scores/claude/CT-0009.quality.toml,,,feature,backend_service,python
-CT-0010,trajectories/qwen/CT-0010.jsonl,,scores/qwen/CT-0010.quality.toml,trajectories/claude/CT-0010.jsonl,,scores/claude/CT-0010.quality.toml,,,bug-fix,mobile_app,ts
+﻿id,qwen 本地trajectory,qwen session id,qwen rubrics 人工评分,claude 本地trajectory,claude session id,claude rubrics 人工评分,qwen passrate,claude passrate,任务类型,应用领域,编程语言,命中QwenBad Pattern
+CT-0001,trajectories/qwen/CT-0001.jsonl,a1b2c3d4-5678-90ab-cdef-111111111111,scores/qwen/CT-0001.quality.toml,trajectories/claude/CT-0001.jsonl,f9e8d7c6-5432-10fe-dcba-222222222222,scores/claude/CT-0001.quality.toml,0.4571,0.8286,bug-fix,web_frontend,ts,
+CT-0002,trajectories/qwen/CT-0002.jsonl,,scores/qwen/CT-0002.quality.toml,trajectories/claude/CT-0002.jsonl,,scores/claude/CT-0002.quality.toml,,,bug-fix,backend_service,python,
+CT-0003,trajectories/qwen/CT-0003.jsonl,,scores/qwen/CT-0003.quality.toml,trajectories/claude/CT-0003.jsonl,,scores/claude/CT-0003.quality.toml,,,feature,web_frontend,ts,
+CT-0004,trajectories/qwen/CT-0004.jsonl,,scores/qwen/CT-0004.quality.toml,trajectories/claude/CT-0004.jsonl,,scores/claude/CT-0004.quality.toml,,,bug-fix,web_frontend,ts,
+CT-0005,trajectories/qwen/CT-0005.jsonl,,scores/qwen/CT-0005.quality.toml,trajectories/claude/CT-0005.jsonl,,scores/claude/CT-0005.quality.toml,,,feature,backend_service,python,
+CT-0006,trajectories/qwen/CT-0006.jsonl,,scores/qwen/CT-0006.quality.toml,trajectories/claude/CT-0006.jsonl,,scores/claude/CT-0006.quality.toml,,,bug-fix,devtools_test,python,
+CT-0007,trajectories/qwen/CT-0007.jsonl,,scores/qwen/CT-0007.quality.toml,trajectories/claude/CT-0007.jsonl,,scores/claude/CT-0007.quality.toml,,,enhancement,web_frontend,js,
+CT-0008,trajectories/qwen/CT-0008.jsonl,,scores/qwen/CT-0008.quality.toml,trajectories/claude/CT-0008.jsonl,,scores/claude/CT-0008.quality.toml,,,feature,web_frontend,ts,
+CT-0009,trajectories/qwen/CT-0009.jsonl,,scores/qwen/CT-0009.quality.toml,trajectories/claude/CT-0009.jsonl,,scores/claude/CT-0009.quality.toml,,,feature,backend_service,python,
+CT-0010,trajectories/qwen/CT-0010.jsonl,,scores/qwen/CT-0010.quality.toml,trajectories/claude/CT-0010.jsonl,,scores/claude/CT-0010.quality.toml,,,bug-fix,mobile_app,ts,

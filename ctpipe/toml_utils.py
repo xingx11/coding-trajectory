@@ -83,4 +83,7 @@ def is_unscored_template(criteria: list[Criterion]) -> bool:
 
 
 def is_complete_rubric(criteria: list[Criterion]) -> bool:
-    return len(criteria) == EXPECTED_CRITERIA_COUNT
+    if len(criteria) != EXPECTED_CRITERIA_COUNT:
+        return False
+    scored_count = sum(1 for c in criteria if c.score > 0 or c.rationale)
+    return scored_count == EXPECTED_CRITERIA_COUNT

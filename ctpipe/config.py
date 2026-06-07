@@ -32,6 +32,7 @@ class TaskConfig:
     prompt_claude: str
     followups_qwen: list[str] = field(default_factory=list)
     followups_claude: list[str] = field(default_factory=list)
+    bad_pattern: str = ""
 
     @property
     def project_subdir(self) -> str:
@@ -49,6 +50,7 @@ class TaskConfig:
             "prompt_claude": self.prompt_claude,
             "followups_qwen": list(self.followups_qwen),
             "followups_claude": list(self.followups_claude),
+            "bad_pattern": self.bad_pattern,
         }
 
     @classmethod
@@ -64,6 +66,7 @@ class TaskConfig:
             prompt_claude=str(data["prompt_claude"]),
             followups_qwen=[str(item) for item in data.get("followups_qwen", [])],
             followups_claude=[str(item) for item in data.get("followups_claude", [])],
+            bad_pattern=str(data.get("bad_pattern", "")),
         )
 
 
@@ -75,6 +78,7 @@ class BatchConfig:
     tasks: list[TaskConfig]
     qwen: ModelConfig
     claude: ModelConfig
+    person_id: str = ""
     github_token: str = ""
     gitee_token: str = ""
     http_proxy: str = ""
@@ -146,6 +150,26 @@ SUBMISSION_FIELDNAMES = [
     "任务类型",
     "应用领域",
     "编程语言",
+    "命中QwenBad Pattern",
+]
+
+THRESHOLD_QWEN_MAX = 0.7
+THRESHOLD_CLAUDE_MIN = 0.71
+THRESHOLD_RELATIVE_GAIN_MIN = 0.2
+
+CLAUDE_CODE_VERSION = "2.1.86"
+
+VALID_TASK_TYPES = [
+    "bug-fix",
+    "feature",
+    "enhancement",
+    "from_scratch",
+    "testing-quality",
+    "refactor-maintenance",
+    "build-release-config",
+    "documentation",
+    "code-explanation",
+    "security-compliance",
 ]
 
 SUBMISSION_KEY_MAP: dict[str, str] = {
@@ -160,6 +184,31 @@ SUBMISSION_KEY_MAP: dict[str, str] = {
     "任务类型": "task_type",
     "应用领域": "domain",
     "编程语言": "language",
+    "命中QwenBad Pattern": "bad_pattern",
+}
+
+BAD_PATTERNS = [
+    "lazy_shortcut",
+    "poor_interaction",
+    "github_based",
+    "environment_dependency",
+    "instruction_follow",
+    "attachment_binary",
+    "planning_only",
+    "macos_development",
+    "parallel_tool_usage",
+]
+
+BAD_PATTERN_DESCRIPTIONS: dict[str, str] = {
+    "lazy_shortcut": "偷懒 - 模型只做核心功能，忽略隐式质量要求",
+    "poor_interaction": "交互不通畅 - 模型不与用户确认就直接执行",
+    "github_based": "基于GitHub的题目 - 需要web search定位旧版本bug",
+    "environment_dependency": "环境依赖 - venv/cuda/python版本等环境陷阱",
+    "instruction_follow": "指令follow - 不遵循CLAUDE.md或项目约束",
+    "attachment_binary": "附件处理不足 - 不主动处理PDF/zip/图片等附件",
+    "planning_only": "只做准备/只写计划 - 不执行实质动作或不使用自定义工具",
+    "macos_development": "macOS开发能力不足 - 套用Linux方案",
+    "parallel_tool_usage": "并行能力不足 - 串行处理可并行子任务",
 }
 
 
@@ -167,8 +216,8 @@ def build_claude_env(model_config: ModelConfig) -> dict[str, str]:
     """Build environment dict for running `claude -p` subprocesses.
 
     Sets ANTHROPIC_AUTH_TOKEN (Claude Code's auth), ANTHROPIC_BASE_URL,
-    model overrides, and git-bash path. Proxy vars are removed so the
-    API endpoint is accessed directly.
+    model overrides, and git-bash path. The API endpoint host is added
+    to NO_PROXY so it bypasses any configured proxy.
     """
     env = os.environ.copy()
     if model_config.auth_token:
@@ -181,9 +230,15 @@ def build_claude_env(model_config: ModelConfig) -> dict[str, str]:
         "ANTHROPIC_DEFAULT_OPUS_MODEL": model_config.model,
         "CLAUDE_CODE_SUBAGENT_MODEL": model_config.model,
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_AUTOUPDATER": "1",
     })
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        env.pop(key, None)
+    api_host = _extract_host(model_config.base_url)
+    no_proxy = env.get("NO_PROXY", env.get("no_proxy", ""))
+    if api_host and api_host not in no_proxy:
+        entries = [e.strip() for e in no_proxy.split(",") if e.strip()]
+        entries.append(api_host)
+        env["NO_PROXY"] = ",".join(entries)
+        env["no_proxy"] = env["NO_PROXY"]
     git_bash = _find_git_bash()
     if git_bash:
         env.setdefault("CLAUDE_CODE_GIT_BASH_PATH", git_bash)
@@ -212,6 +267,12 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
     data = tomllib.loads(tasks_toml.read_text(encoding="utf-8"))
     env = load_env(env_path)
 
+    for key, value in env.items():
+        if key.startswith("OTEL_") or key in (
+            "NODE_OPTIONS", "CLAUDE_CODE_ENABLE_TELEMETRY", "CLAUDE_TELEMETRY_DEBUG",
+        ):
+            os.environ.setdefault(key, value)
+
     batch = data.get("batch", {})
 
     qwen = ModelConfig(
@@ -238,6 +299,7 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
             prompt_claude=t["prompt_claude"],
             followups_qwen=t.get("followups_qwen", []),
             followups_claude=t.get("followups_claude", []),
+            bad_pattern=t.get("bad_pattern", ""),
         ))
 
     return BatchConfig(
@@ -247,6 +309,7 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
         tasks=tasks,
         qwen=qwen,
         claude=claude,
+        person_id=batch.get("person_id", ""),
         github_token=env.get("GITHUB_TOKEN", ""),
         gitee_token=env.get("GITEE_TOKEN", ""),
         http_proxy=env.get("HTTP_PROXY", ""),

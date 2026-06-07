@@ -107,6 +107,13 @@ def find_trajectory_for_run(
     if not proj_dir.is_dir():
         return None
 
+    # Fast path: JSONL filename is {session_id}.jsonl
+    if expected_session_id:
+        direct = proj_dir / f"{expected_session_id}.jsonl"
+        if direct.is_file() and direct.stat().st_mtime > start_time:
+            return direct
+
+    # Collect candidates: all JSONL files modified after run start
     candidates: list[tuple[Path, float]] = []
     for f in proj_dir.iterdir():
         if f.suffix == ".jsonl":
@@ -117,8 +124,11 @@ def find_trajectory_for_run(
     if not candidates:
         return None
 
+    # Try matching by session_id in filename or file content
     if expected_session_id:
         for f, _ in candidates:
+            if f.stem == expected_session_id:
+                return f
             with f.open("r", encoding="utf-8", errors="replace") as fh:
                 for line_num, line in enumerate(fh):
                     if line_num >= 50:
@@ -135,6 +145,7 @@ def find_trajectory_for_run(
                     if obj.get("sessionId") == expected_session_id:
                         return f
 
+    # Fallback: take most recent file
     candidates.sort(key=lambda item: item[1], reverse=True)
     return candidates[0][0]
 
