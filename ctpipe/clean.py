@@ -14,12 +14,13 @@ from ctpipe.project_hash import CLAUDE_PROJECTS_DIR, path_to_project_hash
 from ctpipe.state import PipelineState
 
 
-def _human_size(nbytes: int) -> str:
+def _human_size(nbytes: int | float) -> str:
+    size = float(nbytes)
     for unit in ("B", "KB", "MB", "GB"):
-        if abs(nbytes) < 1024:
-            return f"{nbytes:.1f} {unit}"
-        nbytes /= 1024  # type: ignore[assignment]
-    return f"{nbytes:.1f} TB"
+        if abs(size) < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
 
 
 def _dir_size(path: Path) -> int:
@@ -31,6 +32,18 @@ def _dir_size(path: Path) -> int:
     except (OSError, PermissionError):
         pass
     return total
+
+
+def _is_safe_rmtree_target(path: Path, base_dirs: list[Path]) -> bool:
+    """Check that path is under one of the allowed base directories."""
+    resolved = path.resolve()
+    for base in base_dirs:
+        try:
+            resolved.relative_to(base.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def clean(
@@ -50,10 +63,11 @@ def clean(
         dry_run: Only print what would be deleted.
     """
     tasks = select_delivery_tasks(config, task_ids)
-    state = PipelineState(config.delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
 
     removed_dirs: list[tuple[Path, int]] = []
     action = "Would remove" if dry_run else "Removing"
+    allowed_bases = [config.runs_root, config.base_dir, CLAUDE_PROJECTS_DIR]
 
     # --- Clean runs/ directories ---
     if runs:
@@ -79,6 +93,9 @@ def clean(
                     dirs_to_remove.add(child)
 
         for d in sorted(dirs_to_remove):
+            if not _is_safe_rmtree_target(d, allowed_bases):
+                print(f"  SKIP (outside allowed dirs): {d}")
+                continue
             size = _dir_size(d)
             print(f"  {action}: {d} ({_human_size(size)})")
             if not dry_run:
@@ -110,6 +127,9 @@ def clean(
                     pass
 
         for d in sorted(cache_dirs):
+            if not _is_safe_rmtree_target(d, allowed_bases):
+                print(f"  SKIP (outside allowed dirs): {d}")
+                continue
             size = _dir_size(d)
             print(f"  {action}: {d} ({_human_size(size)})")
             if not dry_run:
@@ -130,6 +150,9 @@ def clean(
         for child in sorted(base_dir.iterdir()):
             if child.is_dir() and child.name.startswith("delivery_"):
                 if child.resolve() != current_delivery:
+                    if not _is_safe_rmtree_target(child, allowed_bases):
+                        print(f"  SKIP (outside allowed dirs): {child}")
+                        continue
                     size = _dir_size(child)
                     print(f"  {action}: {child} ({_human_size(size)})")
                     if not dry_run:

@@ -6,19 +6,22 @@ import csv
 
 from ctpipe.config import (
     BAD_PATTERNS,
-    THRESHOLD_CLAUDE_MIN,
-    THRESHOLD_QWEN_MAX,
-    THRESHOLD_RELATIVE_GAIN_MIN,
     VALID_TASK_TYPES,
     BatchConfig,
+    check_passrate_thresholds,
     select_delivery_tasks,
 )
-from ctpipe.finalize import _assign_submission_ids
+from ctpipe.finalize import assign_submission_ids
 from ctpipe.toml_utils import calc_passrate, is_complete_rubric, is_unscored_template, read_quality_toml
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 
 def validate(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None) -> bool:
+    # Always compute submission IDs from the full task list so that
+    # sequence numbers stay consistent whether or not --tasks is used.
+    all_tasks = select_delivery_tasks(config, task_ids=None)
+    submission_id_map = assign_submission_ids(all_tasks, config.person_id, config.delivery_date)
+
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
     delivery_dir = config.delivery_dir
@@ -26,9 +29,6 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
 
     if not tasks:
         issues.append("no tasks found in delivery manifest or tasks.toml")
-
-    # Build submission ID mapping to match CSV rows
-    submission_id_map = _assign_submission_ids(tasks, config.person_id, config.delivery_date)
 
     submission_rows: dict[str, dict[str, str]] = {}
     submission_path = delivery_dir / "submission.csv"
@@ -56,6 +56,9 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
         if not row:
             issues.append(f"[{task.id}] submission row missing (expected id={sub_id})")
 
+        # Cache passrates from score reads for threshold checking below
+        cached_passrates: dict[str, float] = {}
+
         for model_name in models:
             trajectory_path = find_delivery_trajectory(delivery_dir, model_name, task.id)
             if not trajectory_path:
@@ -65,7 +68,13 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 )
                 continue
 
-            info = parse_trajectory(trajectory_path)
+            try:
+                info = parse_trajectory(trajectory_path)
+            except Exception as exc:
+                issues.append(
+                    f"[{task.id}/{model_name}] trajectory parse error: {exc}"
+                )
+                continue
             if not info.session_id and not info.models:
                 issues.append(
                     f"[{task.id}/{model_name}] trajectory has no valid content "
@@ -119,14 +128,16 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 continue
 
             if not is_complete_rubric(criteria):
-                scored_count = sum(1 for c in criteria if c.score > 0 or c.rationale)
+                scored_count = sum(1 for c in criteria if c.score >= 1 and c.rationale)
                 issues.append(
                     f"[{task.id}/{model_name}] score file incomplete: "
-                    f"{scored_count}/7 criteria scored"
+                    f"{scored_count}/{len(criteria)} criteria scored"
                 )
                 continue
 
-            passrate = f"{calc_passrate(criteria):.4f}"
+            pr = calc_passrate(criteria)
+            cached_passrates[model_name] = pr
+            passrate = f"{pr:.4f}"
             if row:
                 csv_pr = row.get(f"{model_name} passrate", "")
                 if csv_pr:
@@ -142,44 +153,15 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                             f"{csv_pr!r} != {passrate!r}"
                         )
 
-        qwen_pr = 0.0
-        claude_pr = 0.0
-        has_qwen = False
-        has_claude = False
-        for model_name in models:
-            score_path = delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
-            if score_path.exists():
-                try:
-                    criteria = read_quality_toml(score_path)
-                    if is_complete_rubric(criteria) and not is_unscored_template(criteria):
-                        pr = calc_passrate(criteria)
-                        if model_name == "qwen":
-                            qwen_pr = pr
-                            has_qwen = True
-                        elif model_name == "claude":
-                            claude_pr = pr
-                            has_claude = True
-                except Exception:
-                    pass
+        # Threshold checks using cached passrates (no re-read needed)
+        qwen_pr = cached_passrates.get("qwen", 0.0)
+        claude_pr = cached_passrates.get("claude", 0.0)
+        has_qwen = "qwen" in cached_passrates
+        has_claude = "claude" in cached_passrates
 
-        if has_qwen and qwen_pr >= THRESHOLD_QWEN_MAX:
-            issues.append(f"[{task.id}] qwen passrate {qwen_pr:.4f} >= {THRESHOLD_QWEN_MAX}")
-        if has_claude and has_qwen and claude_pr <= qwen_pr:
-            issues.append(f"[{task.id}] claude passrate {claude_pr:.4f} <= qwen {qwen_pr:.4f}")
-        if has_claude and has_qwen:
-            if qwen_pr > 0:
-                relative_gain = (claude_pr - qwen_pr) / qwen_pr
-                if relative_gain <= THRESHOLD_RELATIVE_GAIN_MIN:
-                    issues.append(
-                        f"[{task.id}] relative gain {relative_gain:.2%} <= {THRESHOLD_RELATIVE_GAIN_MIN:.0%} "
-                        f"(claude={claude_pr:.4f}, qwen={qwen_pr:.4f})"
-                    )
-            else:
-                if claude_pr < THRESHOLD_RELATIVE_GAIN_MIN:
-                    issues.append(
-                        f"[{task.id}] qwen=0, claude passrate {claude_pr:.4f} too low "
-                        f"(need >= {THRESHOLD_RELATIVE_GAIN_MIN} when qwen=0)"
-                    )
+        issues.extend(check_passrate_thresholds(
+            task.id, qwen_pr, claude_pr, has_qwen, has_claude,
+        ))
 
     print("\nValidation summary")
     print("=" * 60)

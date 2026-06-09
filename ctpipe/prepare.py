@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from ctpipe.config import SUBMISSION_FIELDNAMES, BatchConfig, TaskConfig, load_task_manifest, select_tasks, write_task_manifest
+from ctpipe.project_scan import SCAN_IGNORE
 from ctpipe.state import PipelineState
 
 
@@ -34,9 +35,7 @@ SETTINGS_LOCAL = {
     }
 }
 
-IGNORE_PATTERNS = shutil.ignore_patterns(
-    "node_modules", ".venv", "__pycache__", ".git", "dist", ".next", ".nuxt",
-)
+IGNORE_PATTERNS = shutil.ignore_patterns(*SCAN_IGNORE)
 
 
 def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> Path:
@@ -112,6 +111,26 @@ def _create_delivery_skeleton(config: BatchConfig) -> None:
 def _build_metadata_content(task: TaskConfig) -> str:
     followups_qwen = "\n".join(f"- {item}" for item in task.followups_qwen) or "- "
     followups_claude = "\n".join(f"- {item}" for item in task.followups_claude) or "- "
+
+    # Generate project summary from source code
+    project_summary = ""
+    if task.project_path.is_dir():
+        from ctpipe.project_scan import scan_project
+        project_summary = scan_project(task.project_path)
+
+    # Build task description section if available
+    task_desc_section = ""
+    if task.task_title or task.task_description or task.acceptance_criteria:
+        desc_parts = ["## Task Description\n"]
+        if task.task_title:
+            desc_parts.append(f"- Title: {task.task_title}")
+        if task.task_description:
+            desc_parts.append(f"- Description: {task.task_description}")
+        if task.acceptance_criteria:
+            criteria_lines = "\n".join(f"  - {item}" for item in task.acceptance_criteria)
+            desc_parts.append(f"- Acceptance criteria:\n{criteria_lines}")
+        task_desc_section = "\n".join(desc_parts) + "\n\n"
+
     return f"""# {task.id} Metadata
 
 ## Codebase
@@ -121,13 +140,19 @@ def _build_metadata_content(task: TaskConfig) -> str:
 - Open-source repo URL:
 - Commit / branch / snapshot:
 
+## Project Summary
+
+```text
+{project_summary}
+```
+
 ## Task Label
 
 - Task type: {task.task_type}
 - Application domain: {task.domain}
 - Language: {task.language}
 
-## Qwen Conversation
+{task_desc_section}## Qwen Conversation
 
 - Session id:
 - Trajectory file: trajectories/qwen/{task.id}.jsonl
@@ -187,7 +212,7 @@ def _create_metadata_stub(config: BatchConfig, task: TaskConfig) -> None:
 
 
 def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
-    state = PipelineState(config.delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
 
     print("Creating delivery directory skeleton...")
     _create_delivery_skeleton(config)

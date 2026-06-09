@@ -35,6 +35,8 @@ def main() -> int:
     p_score = sub.add_parser("score", help="AI-generate initial quality scores")
     p_score.add_argument("--tasks", nargs="*")
     p_score.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_score.add_argument("--auto-rescore", action="store_true",
+                         help="Auto-trigger rescore for tasks failing passrate thresholds")
 
     p_finalize = sub.add_parser("finalize", help="Calculate passrates and generate submission.csv")
     p_finalize.add_argument("--tasks", nargs="*")
@@ -63,6 +65,10 @@ def main() -> int:
     p_all.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
     p_all.add_argument("--turn-timeout", type=int, default=900)
     p_all.add_argument("--total-timeout", type=int, default=3600)
+    p_all.add_argument("--auto-rescore", action="store_true", default=True,
+                       help="Auto-trigger rescore for tasks failing passrate thresholds (default: on)")
+    p_all.add_argument("--no-auto-rescore", action="store_false", dest="auto_rescore",
+                       help="Disable auto-rescore after scoring")
 
     p_reset = sub.add_parser("reset", help="Reset pipeline state for specific tasks/stages to allow re-runs")
     p_reset.add_argument("--tasks", nargs="+", required=True, help="Task IDs to reset")
@@ -76,10 +82,27 @@ def main() -> int:
     p_check.add_argument("--tasks", nargs="*")
     p_check.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
 
+    p_rescore = sub.add_parser("rescore", help="Re-score with customized dimensions and descriptions")
+    p_rescore.add_argument("--tasks", nargs="*", help="Specific task IDs to rescore")
+    p_rescore.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+
     p_stats = sub.add_parser("stats", help="Show pipeline stage statistics")
     p_stats.add_argument("--tasks", nargs="*")
     p_stats.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
     p_stats.add_argument("--format", choices=["table", "json"], default="table", dest="fmt")
+    p_stats.add_argument("--timing", action="store_true", default=False, help="Include run/score duration statistics")
+
+    p_retry = sub.add_parser("retry", help="Auto-retry failed/partial pipeline tasks")
+    p_retry.add_argument("--tasks", nargs="*", help="Specific task IDs to retry")
+    p_retry.add_argument("--stages", nargs="*",
+                         choices=["prepare", "run", "collect", "score", "finalize"],
+                         help="Only retry specific stages")
+    p_retry.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_retry.add_argument("--max-retries", type=int, default=2, help="Max retry attempts per entry (default: 2)")
+    p_retry.add_argument("--turn-timeout", type=int, default=900, help="Timeout per turn in seconds")
+    p_retry.add_argument("--total-timeout", type=int, default=3600, help="Total timeout per task and model")
+    p_retry.add_argument("--dry-run", action="store_true", help="Preview what would be retried")
+    p_retry.add_argument("--no-cascade", action="store_true", help="Don't cascade retries to downstream stages")
 
     p_clean = sub.add_parser("clean", help="Post-delivery cleanup of runs, cache, and old deliveries")
     p_clean.add_argument("--tasks", nargs="*", help="Only clean specific task IDs")
@@ -87,6 +110,11 @@ def main() -> int:
     p_clean.add_argument("--cache", action="store_true", help="Also clean ~/.claude/projects/ JSONL cache")
     p_clean.add_argument("--old-deliveries", action="store_true", help="Also remove old delivery_* directories")
     p_clean.add_argument("--dry-run", action="store_true", help="Preview what would be deleted")
+
+    p_export = sub.add_parser("export", help="Export delivery results as a structured JSON report")
+    p_export.add_argument("--tasks", nargs="*", help="Specific task IDs to include")
+    p_export.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_export.add_argument("--output", help="Output file path (default: stdout)")
 
     args = parser.parse_args()
     base_dir = Path(__file__).resolve().parent.parent
@@ -112,7 +140,8 @@ def main() -> int:
 
     elif args.command == "score":
         from ctpipe.score import score_all
-        result = asyncio.run(score_all(config, args.tasks, args.models))
+        result = asyncio.run(score_all(config, args.tasks, args.models,
+                                       auto_rescore=args.auto_rescore))
 
     elif args.command == "finalize":
         from ctpipe.finalize import finalize
@@ -124,6 +153,10 @@ def main() -> int:
 
     elif args.command == "gen":
         from ctpipe.gen import generate
+        from ctpipe.config import _validate_runs_root
+        clone_dir_path = None
+        if args.clone_dir:
+            clone_dir_path = _validate_runs_root(Path(args.clone_dir))
         result = asyncio.run(generate(
             config,
             count=args.count,
@@ -131,7 +164,7 @@ def main() -> int:
             language=args.language,
             task_type=args.task_type,
             from_local=args.from_local,
-            clone_dir=Path(args.clone_dir) if args.clone_dir else None,
+            clone_dir=clone_dir_path,
             dry_run=args.dry_run,
             clone_only=args.clone_only,
             analyze=args.analyze,
@@ -147,9 +180,27 @@ def main() -> int:
         from ctpipe.check import check
         result = check(config, args.tasks, args.models)
 
+    elif args.command == "rescore":
+        from ctpipe.rescore import rescore_all
+        result = asyncio.run(rescore_all(config, args.tasks, args.models))
+
+    elif args.command == "retry":
+        from ctpipe.retry import retry
+        result = asyncio.run(retry(
+            config,
+            task_ids=args.tasks,
+            stages=args.stages,
+            models=args.models,
+            max_retries=args.max_retries,
+            turn_timeout=args.turn_timeout,
+            total_timeout=args.total_timeout,
+            dry_run=args.dry_run,
+            cascade=not args.no_cascade,
+        ))
+
     elif args.command == "stats":
         from ctpipe.stats import show_stats
-        result = show_stats(config, args.tasks, args.models, args.fmt)
+        result = show_stats(config, args.tasks, args.models, args.fmt, args.timing)
 
     elif args.command == "clean":
         from ctpipe.clean import clean
@@ -163,14 +214,24 @@ def main() -> int:
         )
         result = 0
 
+    elif args.command == "export":
+        from ctpipe.export import export_report
+        export_report(
+            config,
+            task_ids=args.tasks,
+            models=args.models,
+            output=Path(args.output) if args.output else None,
+        )
+        result = 0
+
     elif args.command == "reset":
         from ctpipe.state import PipelineState
-        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        state = PipelineState(config.state_path)
         models = args.models or ["qwen", "claude"]
         count = 0
         for task_id in args.tasks:
             for stage in args.stages:
-                if stage in ("run", "collect", "score"):
+                if stage in MODEL_SPECIFIC_STAGES:
                     for model in models:
                         if state.reset(task_id, stage, model):
                             print(f"  Reset {task_id}/{stage}/{model}")
@@ -191,7 +252,7 @@ def main() -> int:
 
 def _run_all_stages(config, args) -> bool:
     from ctpipe.collect import collect_all
-    from ctpipe.config import select_delivery_tasks
+    from ctpipe.config import MODEL_SPECIFIC_STAGES, select_delivery_tasks
     from ctpipe.finalize import finalize
     from ctpipe.prepare import prepare
     from ctpipe.run import run_all
@@ -205,7 +266,7 @@ def _run_all_stages(config, args) -> bool:
         partial = 0
         missing = 0
         for task in tasks:
-            if stage in ("run", "collect", "score"):
+            if stage in MODEL_SPECIFIC_STAGES:
                 for m in models:
                     info = state.get(task.id, stage, m)
                     status = info.get("status", "")
@@ -233,7 +294,7 @@ def _run_all_stages(config, args) -> bool:
         return failed + partial + missing
 
     async def _async_pipeline() -> None:
-        state = PipelineState(config.delivery_dir / "pipeline_state.json")
+        state = PipelineState(config.state_path)
 
         print("=" * 60)
         print("Stage 1/6: PREPARE")
@@ -257,7 +318,8 @@ def _run_all_stages(config, args) -> bool:
         print("\n" + "=" * 60)
         print("Stage 4/6: SCORE")
         print("=" * 60)
-        await score_all(config, args.tasks, args.models)
+        await score_all(config, args.tasks, args.models,
+                        auto_rescore=args.auto_rescore)
         state.reload()
         _check_stage(state, "score", args.models)
 

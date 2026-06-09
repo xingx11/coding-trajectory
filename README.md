@@ -11,6 +11,8 @@
 ```text
 .
 ├─ ctpipe/                    # 自动化 pipeline 源码
+│  ├─ __init__.py             # 包初始化
+│  ├─ __main__.py             # `python -m ctpipe` 入口
 │  ├─ cli.py                  # 命令行入口
 │  ├─ config.py               # tasks.toml + .env 配置加载
 │  ├─ distribution.py         # 225 行题目分布表 + 加权采样
@@ -22,16 +24,27 @@
 │  ├─ score.py                # AI 自动评分（含重试）
 │  ├─ finalize.py             # passrate 计算 + submission.csv
 │  ├─ validate.py             # 完整性校验
+│  ├─ rescore.py              # 定制化维度重评分（两轮 AI 调用）
 │  ├─ check.py                # 深度验证（轮数、模型、session、评分内容）
 │  ├─ clean.py                # 交付后清理（runs、缓存、旧批次）
+│  ├─ export.py               # 导出交付结果为结构化 JSON 报告
+│  ├─ retry.py                # 自动重试失败/部分完成的任务
+│  ├─ stats.py                # Pipeline 各阶段统计信息
 │  ├─ state.py                # JSON 状态管理（幂等重跑，线程安全）
 │  ├─ trajectory.py           # JSONL 解析工具
 │  ├─ toml_utils.py           # TOML 评分文件读写
+│  ├─ project_scan.py         # 项目目录扫描（README、依赖、目录树）
 │  └─ project_hash.py         # Windows 路径 → Claude 项目 hash
 ├─ docs/                      # 参考文档、模板、示例
 │  ├─ examples/               #   参考 JSONL 和 TOML 示例
 │  ├─ analyze_prompt_template.md  #   --analyze 模式的提示词模板
-│  └─ ...
+│  ├─ metadata_template.md    #   metadata 文件模板
+│  ├─ submission_template.csv #   submission.csv 表头模板
+│  ├─ 评分规范.md              #   评分规则和标准详细说明
+│  ├─ 评分文件规范.md          #   评分 TOML 文件格式规范
+│  ├─ collect-salvage-force.md #   collect 阶段的抢救和强制收集指南
+│  ├─ 对外-出题指南 Coding Rubrics.pdf   # 需求文档
+│  └─ 对外-数据需求文档 Coding Rubrics.pdf # 需求文档
 ├─ rubrics_templates/         # 评分模板目录 + passrate 工具
 │  ├─ calc_passrate.py        #   passrate 计算脚本
 │  ├─ qwen/                   #   Qwen 评分模板（由 gen 自动生成）
@@ -211,7 +224,7 @@ python -m ctpipe gen --count 45 --per-project 3 --dry-run
 
 1. **加权采样**：从 225 行分布表中按权重随机选取 N 个 `(task_type, domain, language)` 组合
 2. **分组**（`--per-project > 1` 时）：将 N 个 slot 按每组 M 个分组，每组共享一个项目
-3. **搜索项目**：根据 domain 和 language，通过 GitHub REST API 搜索合适的开源项目（stars ≥ 50、非 fork、非 archived、< 100MB）
+3. **搜索项目**：根据 domain 和 language，通过 GitHub/Gitee REST API 搜索合适的开源项目（GitHub: stars >= 50、Gitee: stars >= 30、非 fork、非 archived、< 100MB）
 4. **克隆项目**：`git clone --depth 1 --filter=blob:none` 到指定目录
 5. **扫描项目**：提取 README、目录树、依赖文件，生成 ~1.5K 字符的项目概要
 6. **AI 发现任务**：
@@ -219,7 +232,8 @@ python -m ctpipe gen --count 45 --per-project 3 --dry-run
    - 批量模式（`per_project>1`）：先批量生成 M 个 idea（1 次调用），再逐个 expand（M 次调用），共 M+1 次
 7. **写入配置**：
    - 自动递增 task_id（`CT-xxxx`）
-   - 生成 rubric 模板写入 `rubrics_templates/qwen/` 和 `rubrics_templates/claude/`
+   - 持久化 AI 生成的 `task_title`、`task_description`、`acceptance_criteria` 到 `tasks.toml`（供下游评分使用）
+   - AI 从 20 个候选维度中选择 7-10 个，为每个维度生成融入项目特征的定制化 description（含 1-5 分档位定义），写入 `rubrics_templates/qwen/` 和 `rubrics_templates/claude/`
    - 格式化 `[[task]]` 条目追加到 `tasks.toml`
 
 **分步模式**：当 AI 调用超时频繁时，可拆分为两步：
@@ -280,17 +294,23 @@ python -m ctpipe gen --count 45 --per-project 3 --dry-run
 3. **编写评分模板**：每个任务 2 份（Qwen/Claude 各一份），放在 `rubrics_templates/` 下
 4. **写入 tasks.toml**：将任务配置追加到 `tasks.toml`
 
-评分模板包含 7 个维度，每个维度 0-5 分，满分 35 分：
+评分模板默认包含 7-10 个维度（从 20 个候选维度中选取），每个维度 1-5 分。`gen` 命令在生成任务时会自动调用 AI 生成定制化的评分维度和 description，包含融入项目名称、技术栈和具体问题的 1-5 分档位定义。AI 自动评分时同一任务的 Qwen 和 Claude 使用相同的维度集合（成对评分）。
 
-| 维度 | 含义 |
+**定制化评分**：每个维度的 description 必须根据当前项目和任务量身定制。`gen` 命令（包括普通模式和 `--analyze` 模式）、`score` 命令和 `rescore` 命令都会自动生成定制化 description。通用模板化的 description（如"模型理解意图的准确性如何"）不合格，正确示例：
+
+> "在 turbulenz_engine 输入设备键盘事件重复触发修复任务中，模型对事件注册链路的理解和修复逻辑推理是否准确？1分：完全误解根因...2分：定位到模块但修复方案不对...3分：理解主链路但遗漏类似问题...4分：正确修复主链路...5分：精准定位并用最小改动覆盖所有输入类型"
+
+20 个候选维度涵盖：
+
+| 类别 | 维度 |
 |------|------|
-| user_experience_and_interaction | 用户体验与交互质量 |
-| task_planning_and_execution_control | 任务规划与执行控制 |
-| semantic_understanding_and_logical_reasoning | 语义理解与逻辑推理 |
-| instruction_compliance_and_constraint_adherence | 指令遵守与约束合规 |
-| engineering_quality_and_completeness | 工程质量与完整度 |
-| delivery_completeness_and_usability | 交付完整性与可用性 |
-| architecture_boundaries_and_security_compliance | 架构边界与安全合规 |
+| 交互与理解 | user_experience_and_interaction, semantic_understanding_and_logical_reasoning, requirements_clarification_and_scope_control |
+| 规划与执行 | task_planning_and_execution_control, instruction_compliance_and_constraint_adherence |
+| 工程质量 | engineering_quality_and_completeness, delivery_completeness_and_usability, maintainability_and_change_minimality |
+| 工具与验证 | tool_usage_and_failure_recovery, testing_and_verification_rigor, context_exploration_and_code_navigation |
+| 安全与架构 | architecture_boundaries_and_security_compliance (weight=2.0), security_privacy_and_secret_handling |
+| 特殊场景 | environment_and_dependency_handling, attachment_and_artifact_handling, external_research_and_source_use, custom_tool_and_protocol_compliance, parallel_workflow_coordination |
+| 证据与交接 | evidence_grounding_and_trace_fidelity, final_response_and_handoff_quality |
 
 `tasks.toml` 条目格式：
 
@@ -307,6 +327,13 @@ clone_method = "git"
 task_type = "bug-fix"
 domain = "web_frontend"
 language = "ts"
+task_title = "修复导航栏在移动端横屏时的布局溢出问题"
+task_description = "移动端横屏模式下导航栏内容超出视口宽度，导致水平滚动条出现"
+acceptance_criteria = [
+  "横屏模式下导航栏不超出视口",
+  "竖屏模式不受影响",
+]
+bad_pattern = "lazy_shortcut"
 prompt_qwen = """..."""
 prompt_claude = """..."""
 followups_qwen = ["...", "..."]
@@ -351,7 +378,7 @@ python -m ctpipe run
 1. 对每个任务，同时启动 Qwen 和 Claude 两个 `claude -p` 进程
 2. 第 1 轮发送初始 prompt，后续轮通过 `--resume <session_id>` 发送 follow-up
 3. 通过 `asyncio.Semaphore(max_parallel)` 控制最大并发任务数
-4. 每轮有 `turn_timeout`（默认 600s），整体有 `total_timeout`（默认 1800s）
+4. 每轮有 `turn_timeout`（默认 900s），整体有 `total_timeout`（默认 3600s）
 5. 运行结果（session_id、耗时、轮数）记录到 `pipeline_state.json`
 
 核心机制：
@@ -378,11 +405,12 @@ python -m ctpipe score
 ```
 
 做了什么：
-1. 从 trajectory JSONL 提取精简文本（用户消息 + 助手回复 + 工具调用摘要，上限 100K 字符）
-2. 将评分模板和 trajectory 文本拼接成 prompt，通过 `claude -p --bare` 调用 AI 评分
-3. AI 返回填好 score 和 rationale 的 TOML
-4. 解析返回的 TOML 并覆盖写入交付目录的评分文件
-5. 解析失败时保存为 `.draft.txt` 供人工处理
+1. 从 trajectory JSONL 提取精简文本（用户消息 + 助手回复 + 工具调用摘要，上限 50K 字符）
+2. 构建中文评分 prompt，包含任务背景（项目名、技术栈、任务标题、验收标准、项目概要）、评分维度定义、评分规则（1-5 分）、rationale 写作要求和 Bad Pattern 识别指引
+3. 成对评分：先评 Qwen（AI 自选 7-10 个维度），再评 Claude（使用 Qwen 选定的相同维度），保证 passrate 可比
+4. 通过 `claude -p` 调用 AI 评分，解析返回的 TOML 并写入交付目录
+5. 验证输出：维度名合法性、score 1-5 整数、rationale 非空、维度数量 6-10
+6. 解析失败时保存为 `.draft.txt` 供人工处理
 
 #### Stage 5：Finalize — 汇总提交
 
@@ -392,7 +420,7 @@ python -m ctpipe finalize
 
 做了什么：
 1. 读取所有评分文件，计算 passrate（`sum(score × weight) / sum(points × weight)`）
-2. 检查阈值：qwen < 0.7、claude >= 0.71、claude > qwen、(claude-qwen)/qwen > 20%
+2. 检查阈值：qwen < 0.7、claude > 0.7、claude > qwen、(claude-qwen)/qwen > 25%
 3. 从 trajectory 中提取 session_id
 4. 生成 `submission.csv`，包含所有任务的 trajectory 路径、session_id、评分路径、passrate、任务标签
 
@@ -407,7 +435,7 @@ python -m ctpipe validate
 - score TOML 文件存在
 - submission.csv 中的路径、session_id、passrate 与实际文件一致
 - metadata 文件存在
-- passrate 阈值：qwen < 0.7、claude >= 0.71、claude > qwen、相对增益 > 20%
+- passrate 阈值：qwen < 0.7、claude > 0.7、claude > qwen、相对增益 > 25%
 
 ---
 
@@ -416,7 +444,7 @@ python -m ctpipe validate
 Pipeline 产出的是 AI 初评结果，需要人工复核：
 
 1. **审核评分**：打开 `delivery_YYYYMMDD/scores/` 下的 `.quality.toml` 文件，检查 AI 给出的 score 和 rationale 是否合理，手动修正
-2. **检查 passrate 阈值**：确认每条数据满足 `qwen < 0.7`、`claude >= 0.71`、`claude > qwen`、`(claude-qwen)/qwen>20%`
+2. **检查 passrate 阈值**：确认每条数据满足 `qwen < 0.7`、`claude > 0.7`、`claude > qwen`、`(claude-qwen)/qwen > 25%`
 3. **补充 metadata**：在 `metadata/CT-xxxx.md` 中记录任务背景和特殊说明
 4. **重新 finalize + validate**：修正评分后重新运行以更新 submission.csv
 
@@ -439,9 +467,85 @@ python -m ctpipe check --models qwen
 - trajectory 轮数是否在合理范围内（2-8 轮）
 - trajectory 中的模型标识是否与预期一致（qwen/claude）
 - session_id 是否与 submission.csv 中记录的一致
-- 评分文件是否完整（7 个维度全部填写，0-5 分范围，rationale 非空）
+- 评分文件是否完整（7-10 个维度，维度名合法，1-5 分范围，rationale 非空）
 - passrate 是否与评分文件实际计算值一致
+- 同一任务 qwen/claude 的维度集合是否一致（成对一致性检查）
 - 跨模型阈值是否满足
+
+#### 定制化重评分（rescore）
+
+当评分文件使用通用模板 description 或 passrate 不达标时，使用 `rescore` 重新生成定制化维度和评分：
+
+```powershell
+# 重评分所有任务
+python -m ctpipe rescore
+
+# 重评分指定任务
+python -m ctpipe rescore --tasks CT-0001 CT-0002
+
+# 仅重评分某一侧
+python -m ctpipe rescore --tasks CT-0001 --models qwen
+```
+
+`rescore` 的两轮流程：
+
+1. **第一轮：维度选择 + description 定制** — 读取任务元数据（项目名、技术栈、任务标题、验收标准、项目概要）和两边轨迹摘要，AI 从 20 个候选维度中选 7-10 个，为每个维度写定制化 description（包含 1-5 分档位定义，融入项目特征）
+2. **第二轮：评分** — 先评 Qwen（带 passrate < 0.7 约束），再评 Claude（带 passrate > 0.7 且 gap > 25% 约束），使用第一轮生成的定制维度，并注入任务背景（项目信息、验收标准等）辅助评分
+
+结果写入 `delivery_*/scores/` 和 `rubrics_templates/`，并验证 passrate 阈值。
+
+#### 自动重试（retry）
+
+Pipeline 的任何阶段都可能因超时、限流等原因产生 `failed` 或 `partial` 状态。`retry` 自动检测这些异常并重试：
+
+```powershell
+# 自动重试所有失败/部分完成的任务
+python -m ctpipe retry
+
+# 仅重试指定阶段
+python -m ctpipe retry --stages run collect
+
+# 指定最大重试次数
+python -m ctpipe retry --max-retries 3
+
+# 预览模式（只打印，不执行）
+python -m ctpipe retry --dry-run
+
+# 不级联到下游阶段
+python -m ctpipe retry --no-cascade
+```
+
+默认行为：检测失败条目 → 重置状态 → 重新执行 → 级联到受影响的下游阶段。例如 `run` 重试成功后会自动重跑 `collect` → `score` → `finalize`。
+
+#### 统计信息（stats）
+
+快速查看各阶段的完成/失败/待处理数量：
+
+```powershell
+# 表格形式（默认）
+python -m ctpipe stats
+
+# JSON 格式
+python -m ctpipe stats --format json
+
+# 包含 run/score 耗时统计
+python -m ctpipe stats --timing
+```
+
+#### 导出报告（export）
+
+将交付结果导出为结构化 JSON 文件，包含 batch_info、per-task 详情和 summary 汇总：
+
+```powershell
+# 导出到文件
+python -m ctpipe export --output delivery_20260609/report.json
+
+# 输出到 stdout
+python -m ctpipe export
+
+# 仅导出指定任务
+python -m ctpipe export --tasks CT-0001 CT-0002
+```
 
 #### 交付后清理（clean）
 
@@ -489,11 +593,20 @@ python -m ctpipe clean --no-runs --cache
 | `python -m ctpipe validate --models qwen` | 仅校验 Qwen 侧数据 |
 | `python -m ctpipe check` | 深度验证（轮数、模型、session、评分内容） |
 | `python -m ctpipe check --tasks CT-0001` | 深度验证指定任务 |
+| `python -m ctpipe rescore` | 定制化维度重评分（两轮 AI：维度选择+评分） |
+| `python -m ctpipe rescore --tasks CT-0001 CT-0002` | 重评分指定任务 |
 | `python -m ctpipe clean` | 清理 runs/ 克隆目录（交付后释放磁盘） |
 | `python -m ctpipe clean --cache` | 同时清理 ~/.claude/projects/ 缓存 |
 | `python -m ctpipe clean --old-deliveries` | 同时清理旧批次交付目录 |
 | `python -m ctpipe clean --dry-run` | 预览要删除的内容（不实际删除） |
 | `python -m ctpipe reset --tasks CT-0001 --stages run collect` | 重置指定任务的指定阶段状态 |
+| `python -m ctpipe stats` | 显示各阶段统计信息（表格/JSON） |
+| `python -m ctpipe stats --timing` | 包含 run/score 耗时统计 |
+| `python -m ctpipe retry` | 自动重试失败/部分完成的任务 |
+| `python -m ctpipe retry --dry-run` | 预览要重试的内容（不实际执行） |
+| `python -m ctpipe retry --max-retries 3` | 最多重试 3 次（默认 2） |
+| `python -m ctpipe export --output report.json` | 导出交付结果为结构化 JSON 报告 |
+| `python -m ctpipe export --tasks CT-0001` | 仅导出指定任务 |
 | `python rubrics_templates\calc_passrate.py <path>` | 手动计算 passrate |
 
 ### 可选参数
@@ -538,6 +651,18 @@ python -m ctpipe gen --count 45 --per-project 3 --dry-run
 # check：深度验证指定任务
 python -m ctpipe check --tasks CT-0001 CT-0002 --models qwen
 
+# stats：显示统计信息（JSON 格式 + 耗时）
+python -m ctpipe stats --format json --timing
+
+# retry：自动重试失败任务（仅指定阶段，级联下游）
+python -m ctpipe retry --stages run collect --max-retries 3
+
+# retry：预览模式
+python -m ctpipe retry --dry-run
+
+# export：导出交付结果为 JSON 报告
+python -m ctpipe export --output delivery_20260609/report.json
+
 # clean：预览清理内容
 python -m ctpipe clean --dry-run
 
@@ -566,9 +691,9 @@ Pipeline 通过 `pipeline_state.json` 记录每个任务在每个阶段的完成
 
 ```text
 qwen passrate  < 0.7
-claude passrate >= 0.71
+claude passrate > 0.7
 claude passrate > qwen passrate
-(claude passrate - qwen passrate) / qwen passrate > 20%
+(claude passrate - qwen passrate) / qwen passrate > 25%
 ```
 
 Passrate 计算公式：
@@ -577,7 +702,7 @@ Passrate 计算公式：
 passrate = sum(score_i × weight_i) / sum(points_i × weight_i)
 ```
 
-当所有维度 weight=1.0、points=5 时，简化为 `sum(7个分数) / 35`。
+分母按实际选中的维度数量、points 和 weight 动态计算。weight 从评分模板 TOML 中读取（与架构边界/安全合规相关的维度通常为 2.0，其余为 1.0）。
 
 ---
 
@@ -640,6 +765,63 @@ python -m ctpipe validate
 
 ---
 
+## 安全加固
+
+Pipeline 在执行过程中涉及子进程调用、外部仓库克隆、API 认证等操作，已实施以下安全防护措施：
+
+### 输入验证
+
+所有用户可控的标识符在使用前都经过严格验证，防止路径遍历和注入攻击：
+
+| 验证函数 | 校验对象 | 防御目标 |
+|----------|----------|----------|
+| `validate_task_id()` | 任务 ID（`CT-xxxx`） | 必须匹配 `^CT-\d{4}$`，阻止 `../` 等注入 |
+| `validate_delivery_date()` | 交付日期（`YYYYMMDD`） | 必须为 8 位数字，阻止路径遍历 |
+| `validate_session_id()` | Session ID | 阻止 `..`、`/`、`\`、`\0` 等危险字符 |
+| `validate_path_component()` | 文件路径组件 | 阻止路径遍历 + Windows 保留设备名（CON、NUL 等） |
+| `is_safe_clone_url()` | Git clone URL | 仅允许 `https://`、`http://`、`git://` 协议，阻止 `file://`、`ssh://` 等本地协议 |
+
+### 子进程沙箱化
+
+克隆的外部仓库可能包含恶意配置文件。在以 `--dangerously-skip-permissions` 执行前，Pipeline 会自动清理：
+
+- 移除仓库中的 `.claude/` 目录（可能包含恶意 hooks 或 settings）
+- 移除 `CLAUDE.md`、`claude.md`、`.claudeignore`（可能注入恶意指令）
+- 重建受信任的 `.claude/settings.local.json`（来自 Pipeline 内部配置）
+
+### 环境变量隔离
+
+`run` 阶段的子进程使用白名单环境变量，而非继承完整的 `os.environ`：
+
+- 仅传递必要变量：`ANTHROPIC_*`、`PATH`、`HOME`、`TEMP`、`SystemRoot`、`ComSpec` 等
+- `GIT_*` 限制为安全前缀（`GIT_AUTHOR_`、`GIT_COMMITTER_`、`GIT_DIR`、`GIT_WORK_TREE`）
+- API Token 不会泄露到子进程的额外环境变量中
+
+### 进程列表安全
+
+- **Prompt 传递**：通过 stdin 传入 `claude -p`，而非 CLI 参数（`--prompt`），防止 prompt 内容出现在 `ps` / 任务管理器的命令行中
+- **API Token 传递**：`github_search.py` 中的 curl 调用通过 `--config -` 从 stdin 传入 Authorization header，防止 token 出现在进程列表中
+
+### 数据完整性
+
+- **TOML 注入防护**：`gen.py` 中写入 TOML 文件时，所有字符串值经过 `_escape_toml_basic_string()` 转义，防止 AI 生成的内容注入恶意 TOML 结构
+- **线程安全状态管理**：`PipelineState` 使用 `threading.RLock()` 保证并发读写安全，`save()` 使用原子写入（先写 `.tmp` 再 rename）
+- **文件锁定**：`_save_used_repo()` 使用 `filelock.FileLock` 防止并发写入冲突
+
+### 文件系统防护
+
+- **符号链接防护**：`project_scan.py` 在扫描项目时跳过符号链接，防止通过 symlink 逃逸读取项目外文件
+- **安全删除**：`clean.py` 在执行 `shutil.rmtree` 前验证目标路径必须在 `runs_root` 或 `delivery_dir` 之下
+- **Clone 目录验证**：`--clone-dir` 参数经过 `_validate_runs_root()` 校验，确保是合法的绝对路径
+- **导出路径验证**：`export` 命令的 `--output` 路径验证必须在项目目录范围内
+
+### 网络安全
+
+- **Retry-After 上限**：HTTP 429 响应的 `Retry-After` 值限制为最大 120 秒，防止恶意服务器通过超大值造成 DoS
+- **Clone URL 协议限制**：仅允许 `https://`、`http://`、`git://` 协议的 clone URL，阻止 `file://`、`ssh://` 等可能的本地文件读取或 SSRF 攻击
+
+---
+
 ## 重要约束
 
 - 不要提交 `.env`、API 密钥或任何真实 token
@@ -653,5 +835,7 @@ python -m ctpipe validate
 ## 相关文档
 
 - [CLAUDE.md](./CLAUDE.md) — Claude Code 的项目指令
-- [docs/前置.md](./docs/前置.md) — 面向低基础用户的数据提取新手教程
+- [docs/评分规范.md](./docs/评分规范.md) — 评分规则和标准详细说明
+- [docs/评分文件规范.md](./docs/评分文件规范.md) — 评分 TOML 文件格式规范
+- [docs/analyze_prompt_template.md](./docs/analyze_prompt_template.md) — `--analyze` 模式的提示词模板
 - [rubrics_templates/README.md](./rubrics_templates/README.md) — 评分模板说明

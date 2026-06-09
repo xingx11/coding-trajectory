@@ -19,7 +19,7 @@ def path_to_project_hash(abs_path: str | Path) -> str:
         if len(p) >= 2 and p[1] == ":":
             return f"{p[0]}--"
         raise ValueError(f"Expected absolute Windows path, got: {abs_path}")
-    slug = rest.replace("/", "-").replace(" ", "-").replace("_", "-")
+    slug = rest.replace("/", "-").replace(" ", "-").replace("_", "-").replace(".", "-")
     return f"{drive}--{slug}"
 
 

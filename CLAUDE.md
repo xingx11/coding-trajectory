@@ -21,9 +21,9 @@ Every submitted row should satisfy:
 
 ```text
 qwen passrate  < 0.7
-claude passrate >= 0.71
+claude passrate > 0.7
 claude passrate > qwen passrate
-(claude passrate - qwen passrate) / qwen passrate > 20%
+(claude passrate - qwen passrate) / qwen passrate > 25%
 ```
 
 Passrate formula:
@@ -32,7 +32,7 @@ Passrate formula:
 sum(score_i × weight_i) / sum(points_i × weight_i)
 ```
 
-With 7 criteria × 5 points × weight 1.0, this simplifies to `sum(7 scores) / 35`.
+Denominator is computed dynamically from the selected criteria (7-10 per task, chosen from 20 candidates). `architecture_boundaries_and_security_compliance` has weight 2.0; all others 1.0. Score range is 1-5 integers.
 
 ## Key Commands
 

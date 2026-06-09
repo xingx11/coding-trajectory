@@ -9,10 +9,8 @@ from pathlib import Path
 from ctpipe.config import (
     SUBMISSION_FIELDNAMES,
     SUBMISSION_KEY_MAP,
-    THRESHOLD_CLAUDE_MIN,
-    THRESHOLD_QWEN_MAX,
-    THRESHOLD_RELATIVE_GAIN_MIN,
     BatchConfig,
+    check_passrate_thresholds,
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
@@ -34,7 +32,7 @@ def _build_submission_id(person_id: str, delivery_date: str, task_type: str, seq
     return f"{person_id}-{date_part}-{task_type}-{seq:02d}"
 
 
-def _assign_submission_ids(
+def assign_submission_ids(
     tasks: list,
     person_id: str,
     delivery_date: str,
@@ -50,16 +48,18 @@ def _assign_submission_ids(
 
 
 def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None) -> None:
-    state = PipelineState(config.delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
+    # Always compute submission IDs from the full task list so that
+    # sequence numbers stay consistent whether or not --tasks is used.
+    all_tasks = select_delivery_tasks(config, task_ids=None)
+    submission_ids = assign_submission_ids(all_tasks, config.person_id, config.delivery_date)
+
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
 
     if not tasks:
         print("No tasks found in delivery manifest or tasks.toml; nothing to finalize.")
         return
-
-    # Build submission ID mapping: CT-XXXX → 56-607-bug-fix-01
-    submission_ids = _assign_submission_ids(tasks, config.person_id, config.delivery_date)
 
     rows: list[dict[str, str]] = []
     issues: list[str] = []
@@ -118,10 +118,10 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                         if is_unscored_template(criteria):
                             issues.append(f"[{task.id}/{model_name}] score file is unscored template")
                         elif not is_complete_rubric(criteria):
-                            scored_count = sum(1 for c in criteria if c.score > 0 or c.rationale)
+                            scored_count = sum(1 for c in criteria if c.score >= 1 and c.rationale)
                             issues.append(
                                 f"[{task.id}/{model_name}] score file incomplete: "
-                                f"{scored_count}/7 criteria scored"
+                                f"{scored_count}/{len(criteria)} criteria scored"
                             )
                         else:
                             passrate = f"{calc_passrate(criteria):.4f}"
@@ -140,10 +140,20 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
             row["task_type"] = task.task_type
             row["domain"] = task.domain
             row["language"] = task.language
-            row["bad_pattern"] = task.bad_pattern
 
-            qwen_pr = float(row.get("qwen_passrate") or 0)
-            claude_pr = float(row.get("claude_passrate") or 0)
+            # Use AI-detected bad pattern from scoring, fall back to task config
+            qwen_score_info = state.get(task.id, "score", "qwen")
+            ai_bad_pattern = qwen_score_info.get("bad_pattern", "")
+            row["bad_pattern"] = ai_bad_pattern or task.bad_pattern
+
+            try:
+                qwen_pr = float(row.get("qwen_passrate") or 0)
+            except (ValueError, TypeError):
+                qwen_pr = 0.0
+            try:
+                claude_pr = float(row.get("claude_passrate") or 0)
+            except (ValueError, TypeError):
+                claude_pr = 0.0
             has_qwen = bool(row.get("qwen_passrate"))
             has_claude = bool(row.get("claude_passrate"))
 
@@ -155,29 +165,11 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 for kw in ("missing", "unscored template", "incomplete", "no valid content", "parse error")
             )
 
-            threshold_ok = True
-            if has_qwen and qwen_pr >= THRESHOLD_QWEN_MAX:
-                issues.append(f"[{task.id}] qwen passrate {qwen_pr:.4f} >= {THRESHOLD_QWEN_MAX}")
-                threshold_ok = False
-            if has_claude and has_qwen and claude_pr <= qwen_pr:
-                issues.append(f"[{task.id}] claude passrate {claude_pr:.4f} <= qwen {qwen_pr:.4f}")
-                threshold_ok = False
-            if has_claude and has_qwen:
-                if qwen_pr > 0:
-                    relative_gain = (claude_pr - qwen_pr) / qwen_pr
-                    if relative_gain <= THRESHOLD_RELATIVE_GAIN_MIN:
-                        issues.append(
-                            f"[{task.id}] relative gain {relative_gain:.2%} <= {THRESHOLD_RELATIVE_GAIN_MIN:.0%} "
-                            f"(claude={claude_pr:.4f}, qwen={qwen_pr:.4f})"
-                        )
-                        threshold_ok = False
-                else:
-                    if claude_pr < THRESHOLD_RELATIVE_GAIN_MIN:
-                        issues.append(
-                            f"[{task.id}] qwen=0, claude passrate {claude_pr:.4f} too low "
-                            f"(need >= {THRESHOLD_RELATIVE_GAIN_MIN} when qwen=0)"
-                        )
-                        threshold_ok = False
+            threshold_issues = check_passrate_thresholds(
+                task.id, qwen_pr, claude_pr, has_qwen, has_claude,
+            )
+            issues.extend(threshold_issues)
+            threshold_ok = len(threshold_issues) == 0
             if any(not bool(row.get(f"{m}_passrate")) for m in models):
                 threshold_ok = False
 

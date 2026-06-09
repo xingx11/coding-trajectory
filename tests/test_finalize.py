@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
 from ctpipe.config import (
+    REFERENCE_CRITERION_DESCRIPTIONS,
     SUBMISSION_FIELDNAMES,
     SUBMISSION_KEY_MAP,
+    REFERENCE_CRITERION_NAMES,
     BatchConfig,
     ModelConfig,
     TaskConfig,
@@ -28,15 +32,16 @@ def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
         tasks=tasks or [],
         qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
         claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
+        person_id="99",
     )
 
 
-def _make_task(task_id: str = "CT-0001") -> TaskConfig:
+def _make_task(task_id: str = "CT-0001", task_type: str = "bug-fix") -> TaskConfig:
     return TaskConfig(
         id=task_id,
         project_path=Path("D:/projects/demo"),
         clone_method="git",
-        task_type="bug-fix",
+        task_type=task_type,
         domain="web_frontend",
         language="ts",
         prompt_qwen="qwen prompt",
@@ -50,10 +55,14 @@ def _setup_task_scores(
     state: PipelineState,
     task_id: str,
     model_name: str,
-    passrate: float,
+    score_per_criterion: int,
     session_id: str = "s1",
 ) -> None:
-    """Create trajectory file, score file, and state entries for one task/model."""
+    """Create trajectory file, score file, and state entries for one task/model.
+
+    score_per_criterion: integer 1-5. When all criteria have the same score,
+    passrate = score_per_criterion / 5  (e.g. score=2 → passrate=0.4).
+    """
     traj_dir = delivery_dir / "trajectories" / model_name
     traj_dir.mkdir(parents=True, exist_ok=True)
     traj_file = traj_dir / f"{task_id}.jsonl"
@@ -64,10 +73,13 @@ def _setup_task_scores(
 
     score_dir = delivery_dir / "scores" / model_name
     score_dir.mkdir(parents=True, exist_ok=True)
-    score_val = int(passrate * 100)
+    names = REFERENCE_CRITERION_NAMES[:7]
     criteria = [
-        Criterion(f"c{i}", "desc", "likert", 100, 1.0, score_val, "ok")
-        for i in range(7)
+        Criterion(
+            name, REFERENCE_CRITERION_DESCRIPTIONS[name], "likert", 5,
+            1.0, score_per_criterion, "评分理由"
+        )
+        for name in names
     ]
     write_quality_toml(score_dir / f"{task_id}.quality.toml", criteria)
 
@@ -103,8 +115,8 @@ class FinalizeMultiTaskCSVTest(unittest.TestCase):
 
                 state = PipelineState(delivery_dir / "pipeline_state.json")
                 for task in tasks:
-                    _setup_task_scores(delivery_dir, state, task.id, "qwen", 0.50, f"qw-{task.id}")
-                    _setup_task_scores(delivery_dir, state, task.id, "claude", 0.85, f"cl-{task.id}")
+                    _setup_task_scores(delivery_dir, state, task.id, "qwen", 2, f"qw-{task.id}")
+                    _setup_task_scores(delivery_dir, state, task.id, "claude", 4, f"cl-{task.id}")
                 state.save()
 
                 finalize(config)
@@ -121,7 +133,9 @@ class FinalizeMultiTaskCSVTest(unittest.TestCase):
         for col in SUBMISSION_FIELDNAMES:
             self.assertIn(col, fieldnames, f"Missing column: {col}")
         task_ids = {row["id"] for row in rows}
-        self.assertEqual(task_ids, {"CT-0001", "CT-0002", "CT-0003"})
+        # finalize() maps CT-XXXX → formatted submission IDs
+        # person_id=99, date=20990101 → "99-101-bug-fix-{01,02,03}"
+        self.assertEqual(task_ids, {"99-101-bug-fix-01", "99-101-bug-fix-02", "99-101-bug-fix-03"})
 
 
 # =========================================================================
@@ -130,11 +144,16 @@ class FinalizeMultiTaskCSVTest(unittest.TestCase):
 
 
 class FinalizeDualModelThresholdTest(unittest.TestCase):
+    """Test threshold checks with score_per_criterion (int 1-5).
+
+    passrate = score_per_criterion / 5:
+      score=1 → 0.2, score=2 → 0.4, score=3 → 0.6, score=4 → 0.8, score=5 → 1.0
+    """
 
     def _run_finalize_and_get_status(
         self,
-        qwen_passrate: float,
-        claude_passrate: float,
+        qwen_score: int,
+        claude_score: int,
     ) -> str:
         task = _make_task()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -146,8 +165,8 @@ class FinalizeDualModelThresholdTest(unittest.TestCase):
                 write_task_manifest(config.task_manifest_path, [task])
 
                 state = PipelineState(delivery_dir / "pipeline_state.json")
-                _setup_task_scores(delivery_dir, state, task.id, "qwen", qwen_passrate, "qw-s1")
-                _setup_task_scores(delivery_dir, state, task.id, "claude", claude_passrate, "cl-s1")
+                _setup_task_scores(delivery_dir, state, task.id, "qwen", qwen_score, "qw-s1")
+                _setup_task_scores(delivery_dir, state, task.id, "claude", claude_score, "cl-s1")
                 state.save()
 
                 finalize(config)
@@ -155,37 +174,37 @@ class FinalizeDualModelThresholdTest(unittest.TestCase):
                 state2 = PipelineState(delivery_dir / "pipeline_state.json")
                 return state2.get(task.id, "finalize").get("status", "")
 
-    def test_qwen_passrate_at_threshold_is_partial(self) -> None:
-        # THRESHOLD_QWEN_MAX = 0.7; qwen=0.75 >= 0.7 → partial
-        status = self._run_finalize_and_get_status(qwen_passrate=0.75, claude_passrate=0.95)
+    def test_qwen_passrate_above_threshold_is_partial(self) -> None:
+        # qwen score=4 → passrate=0.8 >= 0.7 → partial
+        status = self._run_finalize_and_get_status(qwen_score=4, claude_score=5)
         self.assertEqual(status, "partial")
 
-    def test_qwen_passrate_exactly_at_max_is_partial(self) -> None:
-        # qwen=0.70 >= 0.7 → partial
-        status = self._run_finalize_and_get_status(qwen_passrate=0.70, claude_passrate=0.95)
-        self.assertEqual(status, "partial")
+    def test_qwen_below_threshold_with_sufficient_gain_is_done(self) -> None:
+        # qwen score=3 → 0.6 < 0.7, claude score=4 → 0.8
+        # gain = (0.8-0.6)/0.6 = 33.3% > 30% → done
+        status = self._run_finalize_and_get_status(qwen_score=3, claude_score=4)
+        self.assertEqual(status, "done")
 
     def test_relative_gain_below_threshold_is_partial(self) -> None:
-        # qwen=0.50, claude=0.55, gain=(0.55-0.50)/0.50=10% <= 20% → partial
-        # Also claude <= qwen is false (0.55 > 0.50), so that check passes.
-        # But gain <= 0.2 triggers threshold_ok=False → partial.
-        status = self._run_finalize_and_get_status(qwen_passrate=0.50, claude_passrate=0.55)
+        # qwen score=3 → 0.6, claude score=3 → 0.6, gain=0% <= 25% → partial
+        status = self._run_finalize_and_get_status(qwen_score=3, claude_score=3)
         self.assertEqual(status, "partial")
 
-    def test_claude_below_min_is_partial(self) -> None:
-        # THRESHOLD_CLAUDE_MIN = 0.71; claude=0.65 < 0.71 → partial
-        status = self._run_finalize_and_get_status(qwen_passrate=0.30, claude_passrate=0.65)
+    def test_claude_low_but_gain_sufficient_is_partial(self) -> None:
+        # qwen score=1 → 0.2, claude score=3 → 0.6
+        # gain = 200% > 25%, but claude 0.6 <= 0.7 threshold → partial
+        status = self._run_finalize_and_get_status(qwen_score=1, claude_score=3)
         self.assertEqual(status, "partial")
 
     def test_claude_leq_qwen_is_partial(self) -> None:
-        # claude <= qwen → partial (even if both under thresholds)
-        status = self._run_finalize_and_get_status(qwen_passrate=0.40, claude_passrate=0.40)
+        # claude score=2 → 0.4 <= qwen score=2 → 0.4 → partial
+        status = self._run_finalize_and_get_status(qwen_score=2, claude_score=2)
         self.assertEqual(status, "partial")
 
     def test_all_thresholds_met_is_done(self) -> None:
-        # qwen=0.50 < 0.7, claude=0.85 >= 0.71, claude > qwen,
-        # gain=(0.85-0.50)/0.50=70% > 20% → done
-        status = self._run_finalize_and_get_status(qwen_passrate=0.50, claude_passrate=0.85)
+        # qwen score=2 → 0.4 < 0.7, claude score=4 → 0.8 > 0.7
+        # gain = (0.8-0.4)/0.4 = 100% > 25% → done
+        status = self._run_finalize_and_get_status(qwen_score=2, claude_score=4)
         self.assertEqual(status, "done")
 
 
@@ -417,6 +436,92 @@ class UpdateMetadataFilesRegexTest(unittest.TestCase):
 
         self.assertIn("ORIGINAL-QW", content, "Pre-filled value should be preserved")
         self.assertNotIn("NEW-QW", content, "New value should not overwrite existing one")
+
+
+# =========================================================================
+# Regression: finalize --tasks must keep full-list submission ID numbering
+# =========================================================================
+
+
+class FinalizePartialTasksIdConsistencyTest(unittest.TestCase):
+    """Regression: finalize(config, task_ids=['CT-0002']) must assign the
+    same submission ID as a full finalize over all tasks."""
+
+    def test_second_task_keeps_full_run_id(self) -> None:
+        """3 same-type tasks: partial finalize of CT-0002 must get seq=02."""
+        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_base = Path(tmpdir)
+            with patch.object(
+                BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
+            ):
+                config = _build_config(tasks)
+                delivery_dir = config.delivery_dir
+                delivery_dir.mkdir(parents=True, exist_ok=True)
+                write_task_manifest(config.task_manifest_path, tasks)
+
+                state = PipelineState(delivery_dir / "pipeline_state.json")
+                for task in tasks:
+                    _setup_task_scores(
+                        delivery_dir, state, task.id, "qwen", 2, f"qw-{task.id}"
+                    )
+                    _setup_task_scores(
+                        delivery_dir, state, task.id, "claude", 4, f"cl-{task.id}"
+                    )
+                state.save()
+
+                # Full finalize → read CT-0002's ID from CSV
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    finalize(config)
+
+                with (delivery_dir / "submission.csv").open(
+                    "r", encoding="utf-8-sig", newline=""
+                ) as f:
+                    full_rows = {
+                        r["_task_id"] if "_task_id" in r else r["id"]: r
+                        for r in csv.DictReader(f)
+                    }
+
+                # Read the internal-key CSV to find CT-0002's full-run ID.
+                # _write_submission_csv maps internal keys → Chinese column names.
+                # The task_id is not directly in the CSV, so parse from output.
+                full_output = buf.getvalue()
+                # Output lines look like: "  99-101-bug-fix-02 (CT-0002): ..."
+                full_id_for_ct0002 = None
+                for line in full_output.splitlines():
+                    if "(CT-0002)" in line:
+                        full_id_for_ct0002 = line.strip().split()[0]
+                        break
+                self.assertIsNotNone(full_id_for_ct0002, "CT-0002 not in full output")
+                self.assertIn("bug-fix-02", full_id_for_ct0002)
+
+                # Partial finalize of CT-0002 only
+                buf2 = io.StringIO()
+                with redirect_stdout(buf2):
+                    finalize(config, task_ids=["CT-0002"])
+
+                partial_output = buf2.getvalue()
+                partial_id_for_ct0002 = None
+                for line in partial_output.splitlines():
+                    if "(CT-0002)" in line:
+                        partial_id_for_ct0002 = line.strip().split()[0]
+                        break
+
+                self.assertEqual(
+                    partial_id_for_ct0002,
+                    full_id_for_ct0002,
+                    "Partial finalize changed submission ID for CT-0002",
+                )
+
+                # Also verify the overwritten CSV has the correct ID
+                with (delivery_dir / "submission.csv").open(
+                    "r", encoding="utf-8-sig", newline=""
+                ) as f:
+                    partial_rows = list(csv.DictReader(f))
+                self.assertEqual(len(partial_rows), 1)
+                self.assertEqual(partial_rows[0]["id"], full_id_for_ct0002)
 
 
 if __name__ == "__main__":

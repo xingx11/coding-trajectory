@@ -230,7 +230,8 @@ class RunAllErrorsTest(unittest.TestCase):
             self.assertTrue(summary["had_errors"])
             self.assertEqual(summary["turns"], 3)
 
-    def test_some_turns_errored_marks_done(self) -> None:
+    def test_some_turns_errored_marks_partial(self) -> None:
+        """When some (but not all) turns fail, status should be 'partial'."""
         from ctpipe.run import run_single, TurnResult
 
         task = _make_task()
@@ -264,7 +265,7 @@ class RunAllErrorsTest(unittest.TestCase):
                     turn_timeout=60, total_timeout=300,
                 ))
 
-            self.assertEqual(summary["status"], "done")
+            self.assertEqual(summary["status"], "partial")
             self.assertTrue(summary["had_errors"])
 
 
@@ -350,7 +351,7 @@ class ScoreExceptionWritesFailedTest(unittest.TestCase):
                 async def fake_score_single(task, model_name, cfg, st, env):
                     raise RuntimeError("test explosion")
 
-                with patch("ctpipe.score._build_scoring_env", side_effect=fake_build_scoring_env), \
+                with patch("ctpipe.score.build_validated_env", side_effect=fake_build_scoring_env), \
                      patch("ctpipe.score.score_single", side_effect=fake_score_single):
                     asyncio.run(score_all(config, models=["qwen"]))
 

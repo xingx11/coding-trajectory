@@ -11,6 +11,8 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from ctpipe.config import is_safe_clone_url
+
 try:
     import requests as _requests
 except ImportError:
@@ -90,18 +92,27 @@ def _fetch_via_curl(
     proxy: str = "",
     timeout: int = 30,
 ) -> bytes | None:
-    """Fallback: fetch via system curl (better proxy/TLS handling)."""
+    """Fallback: fetch via system curl (better proxy/TLS handling).
+
+    Headers are passed via --config stdin to avoid exposing tokens in
+    the process command line.
+    """
     curl = shutil.which("curl")
     if not curl:
         return None
-    cmd = [curl, "-s", "-f", "--max-time", str(timeout)]
-    for k, v in headers.items():
-        cmd += ["-H", f"{k}: {v}"]
+    cmd = [curl, "-s", "-f", "--max-time", str(timeout), "--config", "-"]
     if proxy:
         cmd += ["--proxy", proxy]
-    cmd.append(url)
+
+    # Build curl config: headers + URL via stdin (not command-line args)
+    config_lines: list[str] = []
+    for k, v in headers.items():
+        config_lines.append(f'header = "{k}: {v}"')
+    config_lines.append(f'url = "{url}"')
+    config_input = "\n".join(config_lines).encode("utf-8")
+
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+        result = subprocess.run(cmd, input=config_input, capture_output=True, timeout=timeout + 10)
         if result.returncode == 0:
             return result.stdout
     except (subprocess.TimeoutExpired, OSError):
@@ -130,7 +141,7 @@ def _fetch_json(
             try:
                 resp = _requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
                 if resp.status_code == 403:
-                    retry_after = int(resp.headers.get("Retry-After", "60"))
+                    retry_after = min(int(resp.headers.get("Retry-After", "60")), 120)
                     print(f"  WARNING: GitHub rate limit, waiting {retry_after}s...")
                     time.sleep(retry_after)
                     continue
@@ -243,6 +254,10 @@ def clone_project(
         return dest
 
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # Validate clone URL to prevent command injection or unsafe protocols
+    if not is_safe_clone_url(repo.clone_url):
+        print(f"  WARNING: unsafe clone URL rejected: {repo.clone_url[:80]}")
+        return None
     proxy = _resolve_proxy(http_proxy)
     cmd = ["git"]
     if proxy:
@@ -296,29 +311,7 @@ def search_and_clone(
 # Gitee support
 # ---------------------------------------------------------------------------
 
-GITEE_LANGUAGE_MAP: dict[str, str] = {
-    "ts": "TypeScript",
-    "js": "JavaScript",
-    "python": "Python",
-    "java": "Java",
-    "go": "Go",
-    "c": "C",
-    "c++": "C++",
-    "rust": "Rust",
-    "kotlin": "Kotlin",
-    "swift": "Swift",
-    "dart": "Dart",
-    "lua": "Lua",
-    "shell": "Shell",
-    "html/css": "HTML",
-    "sql": "",
-    "ruby": "Ruby",
-    "c#": "C#",
-    "php": "PHP",
-    "scala": "Scala",
-    "r": "R",
-    "other": "",
-}
+_GITEE_LANG_OVERRIDES: dict[str, str] = {"sql": ""}
 
 GITEE_DOMAIN_SEARCH_TERMS: dict[str, str] = {
     "web_frontend": "frontend vue react",
@@ -392,6 +385,8 @@ def _gitee_search_page(
                 continue
 
             clone_url = f"{repo_url}.git"
+            if not is_safe_clone_url(clone_url):
+                continue
             repos.append(GitHubRepo(
                 full_name=full_name,
                 clone_url=clone_url,
@@ -425,7 +420,7 @@ def search_projects_gitee(
     exclude = exclude_repos or set()
     raw_terms = GITEE_DOMAIN_SEARCH_TERMS.get(domain, DOMAIN_SEARCH_TERMS.get(domain, domain.replace("_", " ")))
     domain_kw = raw_terms.split()[:2]
-    gitee_lang = GITEE_LANGUAGE_MAP.get(language, language)
+    gitee_lang = _GITEE_LANG_OVERRIDES.get(language, LANGUAGE_MAP.get(language, language))
 
     headers = {
         "Accept": "application/json",

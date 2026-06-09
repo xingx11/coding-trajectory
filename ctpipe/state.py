@@ -18,7 +18,7 @@ class PipelineState:
         self._path = path
         self._data: dict[str, dict[str, Any]] = {}
         self._batch_depth = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         if path.exists():
             try:
                 self._data = json.loads(path.read_text(encoding="utf-8"))
@@ -26,18 +26,21 @@ class PipelineState:
                 self._data = {}
 
     def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self._path)
+        """Persist state to disk. Thread-safe with blocking lock."""
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._path)
 
     def reload(self) -> None:
         """Re-read state from disk (useful after other stages have written to it)."""
-        if self._path.exists():
-            try:
-                self._data = json.loads(self._path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                pass
+        with self._lock:
+            if self._path.exists():
+                try:
+                    self._data = json.loads(self._path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    print(f"  WARNING: could not reload pipeline state: {exc}")
 
     @contextmanager
     def batch(self):
@@ -70,15 +73,24 @@ class PipelineState:
             if model:
                 if stage not in task:
                     task[stage] = {}
+                existing = task[stage].get(model, {})
                 if "status" in data:
-                    task[stage][model] = data
+                    # Preserve retry_count across status changes unless explicitly provided
+                    preserved: dict[str, Any] = {}
+                    if "retry_count" in existing and "retry_count" not in data:
+                        preserved["retry_count"] = existing["retry_count"]
+                    task[stage][model] = {**preserved, **data}
                 else:
-                    task[stage][model] = {**task[stage].get(model, {}), **data}
+                    task[stage][model] = {**existing, **data}
             else:
+                existing = task.get(stage, {})
                 if "status" in data:
-                    task[stage] = data
+                    preserved = {}
+                    if "retry_count" in existing and "retry_count" not in data:
+                        preserved["retry_count"] = existing["retry_count"]
+                    task[stage] = {**preserved, **data}
                 else:
-                    task[stage] = {**task.get(stage, {}), **data}
+                    task[stage] = {**existing, **data}
             if self._batch_depth == 0:
                 self.save()
 

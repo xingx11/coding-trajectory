@@ -11,30 +11,26 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from ctpipe import strip_claude_wrapper
-from ctpipe.config import BatchConfig, build_claude_env
+from ctpipe.config import (
+    REFERENCE_CRITERION_DESCRIPTIONS,
+    REFERENCE_CRITERION_NAMES,
+    BatchConfig,
+    build_reference_dimension_table,
+    build_validated_env,
+)
 from ctpipe.distribution import DISTRIBUTION, TaskSlot, expand_slot_for_batch, sample_slots
 
-VALID_TASK_TYPES = {slot.task_type for slot in DISTRIBUTION}
 from ctpipe.github_search import search_and_clone, search_and_clone_gitee
-from ctpipe.toml_utils import Criterion, _escape_toml_multiline, write_quality_toml
+from ctpipe.rescore import parse_dimension_output
+from ctpipe.toml_utils import Criterion, escape_toml_multiline, write_quality_toml
+from ctpipe.project_scan import scan_project
 
-CRITERIA_NAMES = [
-    "user_experience_and_interaction",
-    "task_planning_and_execution_control",
-    "semantic_understanding_and_logical_reasoning",
-    "instruction_compliance_and_constraint_adherence",
-    "engineering_quality_and_completeness",
-    "delivery_completeness_and_usability",
-    "architecture_boundaries_and_security_compliance",
-]
+# Default timeouts for gen stages (seconds)
+_GEN_TOTAL_TIMEOUT = 900
+_GEN_STEP_TIMEOUT = 180
 
-SCAN_IGNORE = {
-    "node_modules", ".venv", "__pycache__", ".git", "dist", ".next", ".nuxt",
-    "build", "target", ".gradle", ".idea", ".vscode", "vendor", "coverage",
-    ".tox", "eggs", ".mypy_cache", ".pytest_cache",
-}
-
-SCAN_IGNORE_SUFFIXES = {".egg-info"}
+# Process-internal lock fallback when filelock is not installed
+_repo_lock = __import__("threading").Lock()
 
 IDEA_PROMPT = """You are a coding-task designer. Propose ONE realistic coding task for this project.
 Requirements: realistic, requires cross-file understanding, clear acceptance criteria.
@@ -61,75 +57,8 @@ CRITICAL — Language & style rules for prompt_qwen, prompt_claude, followups_qw
 6. Do NOT start prompts with boilerplate like "你正在一个本地项目目录中工作" or any formulaic prefix. Just state the request directly.
 7. The progressive flow should be: initial prompt = broad goal → followup 1 = core implementation detail → followup 2 = enhancement or edge case → followup 3+ = testing, polish, docs.
 
-criteria_descriptions: exactly 7, each starting with "Evaluates whether".
-Criteria: user_experience_and_interaction, task_planning_and_execution_control, semantic_understanding_and_logical_reasoning, instruction_compliance_and_constraint_adherence, engineering_quality_and_completeness, delivery_completeness_and_usability, architecture_boundaries_and_security_compliance.
 Return ONLY valid JSON (no markdown):
-{"prompt_qwen":"...","prompt_claude":"...","followups_qwen":["..."],"followups_claude":["..."],"criteria_descriptions":["Evaluates whether ..."]}"""
-
-
-def _scan_project(project_path: Path, max_chars: int = 1500) -> str:
-    """Build a concise project summary: README excerpt + tree + deps."""
-    parts: list[str] = []
-
-    for readme_name in ("README.md", "readme.md", "README.rst", "README"):
-        readme_path = project_path / readme_name
-        if readme_path.is_file():
-            try:
-                content = readme_path.read_text(encoding="utf-8", errors="replace")
-                lines = content.splitlines()[:20]
-                parts.append(f"## README\n" + "\n".join(lines) + "\n")
-            except Exception:
-                pass
-            break
-
-    tree_lines: list[str] = []
-    _walk_tree(project_path, "", tree_lines, depth=0, max_depth=2, max_lines=40)
-    parts.append("## Tree\n" + "\n".join(tree_lines[:40]) + "\n")
-
-    dep_files = ["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "pom.xml",
-                 "build.gradle", "Gemfile", "composer.json"]
-    for dep_name in dep_files:
-        dep_path = project_path / dep_name
-        if dep_path.is_file():
-            try:
-                content = dep_path.read_text(encoding="utf-8", errors="replace")
-                lines = content.splitlines()[:15]
-                parts.append(f"## {dep_name}\n" + "\n".join(lines) + "\n")
-            except Exception:
-                pass
-            break
-
-    result = "\n".join(parts)
-    if len(result) > max_chars:
-        result = result[:max_chars] + "\n[... truncated ...]"
-    return result
-
-
-def _should_ignore(name: str) -> bool:
-    if name in SCAN_IGNORE or name.startswith("."):
-        return True
-    return any(name.endswith(s) for s in SCAN_IGNORE_SUFFIXES)
-
-
-def _walk_tree(
-    path: Path, prefix: str, lines: list[str],
-    depth: int = 0, max_depth: int = 4, max_lines: int = 200,
-) -> None:
-    if depth > max_depth or len(lines) >= max_lines:
-        return
-    try:
-        entries = sorted(path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-    except PermissionError:
-        return
-
-    for entry in entries:
-        if _should_ignore(entry.name):
-            continue
-        if len(lines) >= max_lines:
-            return
-        lines.append(f"{prefix}{entry.name}{'/' if entry.is_dir() else ''}")
-        if entry.is_dir():
-            _walk_tree(entry, prefix + "  ", lines, depth + 1, max_depth, max_lines)
+{"prompt_qwen":"...","prompt_claude":"...","followups_qwen":["..."],"followups_claude":["..."]}"""
 
 
 async def _call_claude_p(
@@ -138,9 +67,12 @@ async def _call_claude_p(
     model: str = "",
     timeout: int = 150,
 ) -> str:
-    """Low-level helper: call claude -p and return stdout."""
+    """Low-level helper: call claude -p and return stdout.
+
+    Passes prompt via stdin to avoid exposing content in process listings.
+    """
     cmd = [
-        "claude", "-p", prompt,
+        "claude", "-p",
         "--output-format", "text",
         "--dangerously-skip-permissions",
         "--setting-sources", "local",
@@ -152,11 +84,14 @@ async def _call_claude_p(
     t0 = time.time()
     proc = await asyncio.create_subprocess_exec(
         *cmd, env=env,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode("utf-8")), timeout=timeout,
+        )
     except asyncio.TimeoutError:
         print(f"  [claude -p] Timed out after {time.time() - t0:.0f}s (limit={timeout}s), killing...")
         proc.kill()
@@ -200,7 +135,7 @@ async def _call_gen_expand(
     language: str,
     env: dict[str, str],
     model: str = "",
-    timeout: int = 180,
+    timeout: int = _GEN_STEP_TIMEOUT,
 ) -> str:
     """Stage 2: expand the idea into full prompts/followups/criteria."""
     user_prompt = (
@@ -213,22 +148,27 @@ async def _call_gen_expand(
     return await _call_claude_p(user_prompt, env, model=model, timeout=timeout)
 
 
-def _parse_idea_output(raw: str) -> dict | None:
-    """Parse stage-1 idea JSON output."""
+def _try_parse_json(raw: str, expect_array: bool = False):
+    """Parse JSON from AI output with regex fallback."""
     cleaned = strip_claude_wrapper(raw)
-
     try:
-        data = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        match = re.search(r'\{[\s\S]*\}', cleaned)
+        pattern = r'\[[\s\S]*\]' if expect_array else r'\{[\s\S]*\}'
+        match = re.search(pattern, cleaned)
         if match:
             try:
-                data = json.loads(match.group())
+                return json.loads(match.group())
             except json.JSONDecodeError:
-                return None
-        else:
-            return None
+                pass
+    return None
 
+
+def _parse_idea_output(raw: str) -> dict | None:
+    """Parse stage-1 idea JSON output."""
+    data = _try_parse_json(raw)
+    if not isinstance(data, dict):
+        return None
     if "task_title" not in data or "task_description" not in data:
         return None
     return data
@@ -239,7 +179,7 @@ async def _call_gen_multi_ideas(
     task_specs: list[tuple[str, str, str]],
     env: dict[str, str],
     model: str = "",
-    timeout: int = 180,
+    timeout: int = _GEN_STEP_TIMEOUT,
 ) -> str:
     """Stage 1 batch: generate multiple task ideas in one call.
 
@@ -260,18 +200,7 @@ async def _call_gen_multi_ideas(
 
 def _parse_multi_ideas(raw: str) -> list[dict] | None:
     """Parse stage-1 batch output: a JSON array of idea objects."""
-    cleaned = strip_claude_wrapper(raw)
-
-    data = None
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r'\[[\s\S]*\]', cleaned)
-        if match:
-            try:
-                data = json.loads(match.group())
-            except json.JSONDecodeError:
-                return None
+    data = _try_parse_json(raw, expect_array=True)
 
     if not isinstance(data, list) or len(data) < 1:
         return None
@@ -285,25 +214,13 @@ def _parse_multi_ideas(raw: str) -> list[dict] | None:
 
 
 def _parse_gen_output(raw: str) -> dict | None:
-    cleaned = strip_claude_wrapper(raw)
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if match:
-            try:
-                data = json.loads(match.group())
-            except json.JSONDecodeError:
-                return None
-        else:
-            return None
+    data = _try_parse_json(raw)
+    if not isinstance(data, dict):
+        return None
 
     required = ["prompt_qwen", "prompt_claude", "followups_qwen",
-                 "followups_claude", "criteria_descriptions"]
+                 "followups_claude"]
     if not all(k in data for k in required):
-        return None
-    if len(data["criteria_descriptions"]) != 7:
         return None
     if not isinstance(data["followups_qwen"], list) or len(data["followups_qwen"]) < 2:
         return None
@@ -314,23 +231,35 @@ def _parse_gen_output(raw: str) -> dict | None:
 
 
 def _next_task_id(config: BatchConfig) -> str:
-    """Find the next available CT-xxxx ID."""
+    """Find the next available CT-xxxx ID.
+
+    Checks config.tasks, tasks.toml, and the delivery task manifest
+    to avoid ID collisions.
+    """
+    from ctpipe.config import load_task_manifest
+
     max_num = 0
     for task in config.tasks:
-        match = re.match(r"CT-(\d+)", task.id)
-        if match:
-            max_num = max(max_num, int(match.group(1)))
+        m = re.match(r"CT-(\d+)", task.id)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
 
     toml_path = config.base_dir / "tasks.toml"
     if toml_path.exists():
         try:
             data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
             for t in data.get("task", []):
-                match = re.match(r"CT-(\d+)", t.get("id", ""))
-                if match:
-                    max_num = max(max_num, int(match.group(1)))
-        except Exception:
-            pass
+                m = re.match(r"CT-(\d+)", t.get("id", ""))
+                if m:
+                    max_num = max(max_num, int(m.group(1)))
+        except Exception as exc:
+            print(f"  WARNING: could not parse tasks.toml for ID scan: {exc}")
+
+    manifest_tasks = load_task_manifest(config.task_manifest_path)
+    for task in manifest_tasks:
+        m = re.match(r"CT-(\d+)", task.id)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
 
     return f"CT-{max_num + 1:04d}"
 
@@ -338,21 +267,32 @@ def _next_task_id(config: BatchConfig) -> str:
 def _write_rubric_templates(
     config: BatchConfig,
     task_id: str,
-    descriptions: list[str],
+    custom_criteria: list[Criterion] | None = None,
 ) -> None:
-    """Write rubric TOML templates for both qwen and claude."""
-    criteria = [
-        Criterion(
-            name=name,
-            description=desc,
-            type="likert",
-            points=5,
-            weight=1.0,
-            score=0,
-            rationale="",
-        )
-        for name, desc in zip(CRITERIA_NAMES, descriptions)
-    ]
+    """Write rubric TOML templates for both qwen and claude.
+
+    Args:
+        custom_criteria: If provided, use these customized criteria (with
+            project-specific descriptions). Otherwise falls back to the
+            first 7 candidate dimensions from config.
+    """
+    if custom_criteria:
+        criteria = custom_criteria
+    else:
+        print(f"  [{task_id}] WARNING: using generic reference descriptions (AI customization failed)")
+        default_names = REFERENCE_CRITERION_NAMES[:7]
+        criteria = [
+            Criterion(
+                name=name,
+                description=REFERENCE_CRITERION_DESCRIPTIONS[name],
+                type="likert",
+                points=5,
+                weight=1.0,
+                score=0,
+                rationale="",
+            )
+            for name in default_names
+        ]
 
     for model in ("qwen", "claude"):
         dest_dir = config.rubrics_dir / model
@@ -362,9 +302,115 @@ def _write_rubric_templates(
         print(f"  [rubric] {dest_path}")
 
 
-def _escape_toml_ml(s: str) -> str:
-    """Escape a string for TOML multi-line basic string."""
-    return _escape_toml_multiline(s)
+async def _gen_customize_criteria(
+    project_summary: str,
+    idea: dict,
+    task_type: str,
+    domain: str,
+    language: str,
+    env: dict[str, str],
+    model: str = "",
+    timeout: int = _GEN_STEP_TIMEOUT,
+    project_name: str = "",
+) -> list[Criterion] | None:
+    """Generate customized criteria during gen stage (no trajectory needed).
+
+    Uses project summary + task idea to build a prompt for AI dimension
+    selection and description customization.  Returns criteria list on
+    success, None on failure (caller falls back to generic template).
+    """
+    candidates = build_reference_dimension_table()
+    project_name = project_name or "unknown"
+    task_title = idea.get("task_title", "")
+    task_desc = idea.get("task_description", "")
+
+    prompt = f"""你是评分维度设计师。根据以下项目信息和任务描述，从 20 个参考维度中选择 7-10 个最适合评价本次任务完成质量的维度，并为每个维度写定制化的 description。
+
+## 项目信息
+
+- 项目名称：{project_name}
+- 任务类型：{task_type}
+- 应用领域：{domain}
+- 编程语言：{language}
+- 任务标题：{task_title}
+- 任务描述：{task_desc}
+
+## 项目技术概要
+
+{project_summary[:3000]}
+
+## 20 个参考维度
+
+{candidates}
+
+## 维度选择规则
+
+1. 从 20 个参考维度中选 7-10 个最能评价本次任务完成质量的维度
+2. 必须基于任务描述中真实出现的任务特征选择
+3. 如果某个维度与本任务无关，不要选择它
+4. 优先选择与核心目标、验收标准和最终可用性最相关的维度
+5. 与架构边界、安全合规相关的维度设 weight = 2.0，其余设 1.0
+6. 维度 name 必须是定制化的英文 snake_case 标识名（如 `cirq_export_data_flow_comprehension`），体现项目名/技术栈/具体操作，不要使用通用维度名
+
+## description 定制规则（极其重要）
+
+每个选中维度的 description 必须满足：
+
+1. **保留 1-5 分档位结构**：必须包含 1 分、2 分、3 分、4 分、5 分各档位的具体定义
+2. **融入项目特征**：把项目名称（{project_name}）、技术栈（{language}）、具体任务（{task_title}）融入到各档位的描述中
+3. 不能是通用模板，必须让人一看就知道这是针对什么项目什么任务的评分标准
+4. 使用中文，写成一行字符串
+
+### 定制化示例
+
+通用模板（不合格）：
+"模型理解意图并进行逻辑推理的准确性如何？1分：完全误解意图...5分：精准整合上下文..."
+
+定制化（合格）：
+"在 turbulenz_engine 输入设备键盘事件重复触发修复任务中，模型对 onFocusIn/onFocusOut 事件注册链路的理解和修复逻辑推理是否准确？1分：完全误解键盘事件重复触发的根因，把问题归到无关模块。2分：定位到 inputapp 但修复方案不对，函数引用不一致导致 removeEventListener 无效。3分：理解主链路但遗漏鼠标/触摸事件的类似问题。4分：正确定位并修复键盘事件链路，函数引用一致。5分：精准定位 inputapp.ts 和 inputdevice.ts 的事件注册逻辑，用最小改动修复且覆盖所有输入类型"
+
+## 输出格式
+
+只输出合法 TOML，不要包含 Markdown 代码块、标题或解释。
+所有字符串字段使用普通双引号 `"..."`，不使用 TOML 多行字符串。
+description 内容中禁止出现英文双引号 `"`，如需引用请使用中文引号""。
+score 设为 0，rationale 设为空字符串。
+
+[[criterion]]
+name = "维度名称"
+description = "定制化的中文评分标准（包含1-5分档位定义，融入项目特征）"
+type = "likert"
+points = 5
+weight = 1.0
+score = 0
+rationale = ""
+"""
+
+    for attempt in range(2):
+        raw = await _call_claude_p(prompt, env, model=model, timeout=timeout)
+        if not raw:
+            continue
+        parsed, reason = parse_dimension_output(raw)
+        if parsed:
+            print(f"  [criteria] Customized {len(parsed)} dimensions for this task")
+            return parsed
+        if attempt == 0:
+            print(f"  [criteria] Customize attempt 1 failed: {reason}, retrying...")
+
+    print(f"  [criteria] Customization failed, falling back to generic template")
+    return None
+
+
+def _escape_toml_basic_string(value: str) -> str:
+    """Escape a value for use inside TOML double-quoted basic strings."""
+    return (
+        value
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
 
 
 def _format_toml_entry(
@@ -378,34 +424,42 @@ def _format_toml_entry(
     prompt_claude: str,
     followups_qwen: list[str],
     followups_claude: list[str],
+    task_title: str = "",
+    task_description: str = "",
+    acceptance_criteria: list[str] | None = None,
 ) -> str:
-    """Format a [[task]] TOML block."""
+    """Format a [[task]] TOML block with properly escaped values."""
     def fmt_followups(items: list[str]) -> str:
         lines = []
         for item in items:
-            escaped = item.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-            lines.append(f'  "{escaped}",')
+            lines.append(f'  "{_escape_toml_basic_string(item)}",')
         return "[\n" + "\n".join(lines) + "\n]"
 
-    return (
+    parts = [
         f'\n[[task]]\n'
-        f'id = "{task_id}"\n'
-        f'project_path = "{project_path}"\n'
-        f'clone_method = "{clone_method}"\n'
-        f'task_type = "{task_type}"\n'
-        f'domain = "{domain}"\n'
-        f'language = "{language}"\n'
-        f'prompt_qwen = """{_escape_toml_ml(prompt_qwen)}"""\n'
+        f'id = "{_escape_toml_basic_string(task_id)}"\n'
+        f'project_path = "{_escape_toml_basic_string(project_path)}"\n'
+        f'clone_method = "{_escape_toml_basic_string(clone_method)}"\n'
+        f'task_type = "{_escape_toml_basic_string(task_type)}"\n'
+        f'domain = "{_escape_toml_basic_string(domain)}"\n'
+        f'language = "{_escape_toml_basic_string(language)}"\n'
+    ]
+
+    if task_title:
+        parts.append(f'task_title = "{_escape_toml_basic_string(task_title)}"\n')
+    if task_description:
+        parts.append(f'task_description = """{escape_toml_multiline(task_description)}"""\n')
+    if acceptance_criteria:
+        parts.append(f'acceptance_criteria = {fmt_followups(acceptance_criteria)}\n')
+
+    parts.append(
+        f'prompt_qwen = """{escape_toml_multiline(prompt_qwen)}"""\n'
         f'followups_qwen = {fmt_followups(followups_qwen)}\n'
-        f'prompt_claude = """{_escape_toml_ml(prompt_claude)}"""\n'
+        f'prompt_claude = """{escape_toml_multiline(prompt_claude)}"""\n'
         f'followups_claude = {fmt_followups(followups_claude)}\n'
     )
 
-
-def _build_gen_env(config: BatchConfig) -> dict[str, str]:
-    if not config.claude.auth_token or not config.claude.base_url or not config.claude.model:
-        raise ValueError("Claude config is incomplete in .env (need CLAUDE_AUTH_TOKEN, CLAUDE_BASE_URL, CLAUDE_MODEL)")
-    return build_claude_env(config.claude)
+    return "".join(parts)
 
 
 def _load_used_repos(state_path: Path) -> set[str]:
@@ -414,23 +468,41 @@ def _load_used_repos(state_path: Path) -> set[str]:
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
         return set(data.get("_gen_used_repos", []))
-    except Exception:
+    except Exception as exc:
+        print(f"  WARNING: could not read used repos from state file: {exc}")
         return set()
 
 
 def _save_used_repo(state_path: Path, repo_name: str) -> None:
-    data: dict = {}
-    if state_path.exists():
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    used = data.get("_gen_used_repos", [])
-    if repo_name not in used:
-        used.append(repo_name)
-    data["_gen_used_repos"] = used
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        import filelock as _filelock_mod
+        lock_path = state_path.with_suffix(".lock")
+        lock = _filelock_mod.FileLock(lock_path, timeout=10)
+    except ImportError:
+        lock = None
+
+    def _do_save() -> None:
+        data: dict = {}
+        if state_path.exists():
+            try:
+                data = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        used = data.get("_gen_used_repos", [])
+        if repo_name not in used:
+            used.append(repo_name)
+        data["_gen_used_repos"] = used
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(state_path)
+
+    if lock is not None:
+        with lock:
+            _do_save()
+    else:
+        with _repo_lock:
+            _do_save()
 
 
 async def generate_single(
@@ -444,7 +516,7 @@ async def generate_single(
     from_local: str | None = None,
     dry_run: bool = False,
     toml_lock: asyncio.Lock | None = None,
-    total_timeout: int = 900,
+    total_timeout: int = _GEN_TOTAL_TIMEOUT,
     source: str = "github",
 ) -> bool:
     """Generate a single task from a slot."""
@@ -492,7 +564,7 @@ async def generate_single(
         print(f"  [{_elapsed()}] Got project: {repo_name}")
 
     print(f"  [{_elapsed()}] Scanning project: {project_path}")
-    summary = _scan_project(project_path)
+    summary = scan_project(project_path)
     print(f"  [{_elapsed()}] Project summary: {len(summary)} chars")
 
     remaining = total_timeout - (time.time() - t_start)
@@ -504,7 +576,7 @@ async def generate_single(
     print(f"  [{_elapsed()}] [stage 1] Generating task idea...")
     idea: dict | None = None
     idea_raw = ""
-    stage1_timeout = min(180, int(remaining * 0.4))
+    stage1_timeout = min(_GEN_STEP_TIMEOUT,int(remaining * 0.4))
     for attempt in range(2):
         if attempt > 0:
             print(f"  [{_elapsed()}] [stage 1 retry] Retrying idea generation...")
@@ -553,7 +625,13 @@ async def generate_single(
         print(f"  [{_elapsed()}] ERROR: stage 2 failed after retries, saved to {draft_path.name}")
         return False
 
-    _write_rubric_templates(config, task_id, data["criteria_descriptions"])
+    remaining_crit = max(30, int(total_timeout - (time.time() - t_start)))
+    custom = await _gen_customize_criteria(
+        summary, idea, slot.task_type, slot.domain, slot.language,
+        env, model=config.claude.model, timeout=min(_GEN_STEP_TIMEOUT,remaining_crit),
+        project_name=project_path.name,
+    )
+    _write_rubric_templates(config, task_id, custom_criteria=custom)
 
     project_path_str = str(project_path).replace("\\", "\\\\")
     toml_entry = _format_toml_entry(
@@ -567,6 +645,9 @@ async def generate_single(
         prompt_claude=data["prompt_claude"],
         followups_qwen=data["followups_qwen"],
         followups_claude=data["followups_claude"],
+        task_title=idea.get("task_title", ""),
+        task_description=idea.get("task_description", ""),
+        acceptance_criteria=idea.get("acceptance_criteria", []),
     )
 
     toml_path = config.base_dir / "tasks.toml"
@@ -598,7 +679,7 @@ async def generate_batch(
     toml_lock: asyncio.Lock | None = None,
     repo_lock: asyncio.Lock | None = None,
     api_sem: asyncio.Semaphore | None = None,
-    total_timeout: int = 900,
+    total_timeout: int = _GEN_TOTAL_TIMEOUT,
     source: str = "github",
 ) -> int:
     """Generate multiple tasks from a single project.
@@ -660,7 +741,7 @@ async def generate_batch(
         print(f"  [{_elapsed()}] Got project: {repo_name}")
 
     print(f"  [{_elapsed()}] Scanning project: {project_path}")
-    summary = _scan_project(project_path)
+    summary = scan_project(project_path)
     print(f"  [{_elapsed()}] Project summary: {len(summary)} chars")
 
     remaining = total_timeout - (time.time() - t_start)
@@ -781,7 +862,13 @@ async def generate_batch(
             print(f"  [{_elapsed()}] [{task_id}] Stage 2 failed, saved draft")
             return False
 
-        _write_rubric_templates(config, task_id, data["criteria_descriptions"])
+        remaining_crit = max(30, int(total_timeout - (time.time() - t_start)))
+        custom = await _gen_customize_criteria(
+            summary, idea, s.task_type, s.domain, s.language,
+            env, model=config.claude.model, timeout=min(_GEN_STEP_TIMEOUT,remaining_crit),
+            project_name=project_path.name,
+        )
+        _write_rubric_templates(config, task_id, custom_criteria=custom)
 
         project_path_str = str(project_path).replace("\\", "\\\\")
         toml_entry = _format_toml_entry(
@@ -795,6 +882,9 @@ async def generate_batch(
             prompt_claude=data["prompt_claude"],
             followups_qwen=data["followups_qwen"],
             followups_claude=data["followups_claude"],
+            task_title=idea.get("task_title", ""),
+            task_description=idea.get("task_description", ""),
+            acceptance_criteria=idea.get("acceptance_criteria", []),
         )
 
         toml_path = config.base_dir / "tasks.toml"
@@ -906,7 +996,7 @@ async def _analyze_local(
     config: BatchConfig,
     project_path: Path,
     dry_run: bool = False,
-    total_timeout: int = 900,
+    total_timeout: int = _GEN_TOTAL_TIMEOUT,
 ) -> int:
     """Analyze a local project via Claude Code and write task entries directly."""
     if not project_path.is_dir():
@@ -957,7 +1047,7 @@ async def _analyze_local(
         print(f"Rubrics: {config.rubrics_dir}")
         return 0
 
-    env = _build_gen_env(config)
+    env = build_validated_env(config.claude)
     print(f"\n[analyze] Project: {project_path}")
     print(f"[analyze] Task IDs: {', '.join(task_ids)}")
     print(f"[analyze] Calling Claude Code to analyze and generate tasks...")
@@ -994,12 +1084,12 @@ async def generate(
     dry_run: bool = False,
     clone_only: bool = False,
     analyze: bool = False,
-    total_timeout: int = 900,
+    total_timeout: int = _GEN_TOTAL_TIMEOUT,
     per_project: int = 1,
     source: str = "github",
 ) -> int:
     """Main generation entry point."""
-    state_path = config.delivery_dir / "pipeline_state.json"
+    state_path = config.state_path
     used_repos = _load_used_repos(state_path)
 
     if per_project > 1:
@@ -1029,7 +1119,7 @@ async def generate(
             return 1
         return await _analyze_local(sampled, config, Path(from_local), dry_run, total_timeout)
 
-    env = _build_gen_env(config)
+    env = build_validated_env(config.claude)
 
     base_url = config.claude.base_url
     model = config.claude.model
@@ -1076,7 +1166,7 @@ async def generate(
         )
         for r in results:
             if isinstance(r, Exception):
-                print(f"  ERROR: batch failed with exception: {r}")
+                print(f"  ERROR: batch failed with exception: {str(r)[:200]}")
                 total_count += per_project
             else:
                 total_success += r[0]

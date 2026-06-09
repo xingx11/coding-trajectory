@@ -4,30 +4,30 @@
 
 当前模板按 `docs/examples/` 中的样例文件口径整理：
 
-- `qwen/` 下 10 个 Qwen 评分文件。
-- `claude/` 下 10 个 Claude 评分文件。
-- 每个文件 7 个评分维度。
+- `qwen/` 下 Qwen 评分文件。
+- `claude/` 下 Claude 评分文件。
+- 每个文件 7-10 个评分维度（AI 在 `gen` 或 `score` 阶段从 20 个候选维度中选取）。
 - 每个维度 `points = 5`。
-- 每个维度 `weight = 1.0`。
-- `passrate = score 总和 / 35`。
+- 大部分维度 `weight = 1.0`（`architecture_boundaries_and_security_compliance` 为 2.0）。
+- `passrate = sum(score × weight) / sum(points × weight)`。
 
 ## 字段从哪里来
 
-- `name`：评分维度的英文标识，依据需求文档中的质检原则和 rubrics 要求整理。
-- `description`：针对当前任务写出的评分说明，来自这 10 条任务的需求、验收点和风险点。
-- `type`：固定为 `likert`，表示人工按 0-5 分打分。
+- `name`：评分维度的英文标识，AI 根据任务特征从 20 个候选维度中选取。
+- `description`：AI 自动生成的定制化评分标准，融入项目名称、技术栈和具体任务特征，包含 1-5 分各档位的具体定义。不接受通用模板化的 description。
+- `type`：固定为 `likert`，表示按 1-5 分打分。
 - `points`：固定为 `5`，与官方示例一致。
-- `weight`：固定为 `1.0`，与官方示例一致。
-- `score`：你看完 trajectory 和最终代码结果后人工填写。
-- `rationale`：你人工填写评分理由，要写具体证据。
+- `weight`：大部分为 `1.0`（`architecture_boundaries_and_security_compliance` 为 2.0）。
+- `score`：AI 评分或人工审核后填写。
+- `rationale`：评分理由，需写具体证据。
 
-这些 `name` 和 `description` 不是 Claude 或 Qwen 在跑题时直接生成的，而是根据任务要求和需求文档里的质检口径提前设计好的评分模板。Qwen / Claude 只产生 trajectory 和最终结果；评分文件由你人工填写。
+`name` 和 `description` 在 `gen` 阶段由 AI 自动生成（针对每个任务的项目和需求定制化）。`score` 和 `rescore` 命令可基于轨迹数据进一步优化。
 
 ## 填写规则
 
 - 只填写 `score` 和 `rationale`。
 - 不建议修改 `name`、`description`、`type`、`points`、`weight`。
-- 每个 `score` 填 `0` 到 `5` 的整数。
+- 每个 `score` 填 `1` 到 `5` 的整数。
 - `rationale` 要结合轨迹、代码改动、测试和最终答复写具体理由。
 - 不要提交所有 `score = 0` 的空模板。
 
@@ -46,7 +46,9 @@
 | CT-0009 | 408 院校库组合筛选 | `qwen/CT-0009.quality.toml` | `claude/CT-0009.quality.toml` |
 | CT-0010 | study-mobile 请求错误与登录失效处理 | `qwen/CT-0010.quality.toml` | `claude/CT-0010.quality.toml` |
 
-## 7 个评分维度
+## 评分维度
+
+`gen` 命令在生成任务时会自动从 20 个候选维度中选择 7-10 个最适合当前任务的维度，并生成定制化的 description。同一任务的 Qwen 和 Claude 使用相同的维度集合。`score` 和 `rescore` 命令可基于轨迹数据进一步优化维度选择和 description。
 
 | name | 中文含义 | 权重 | 主要看什么 |
 | --- | --- | ---: | --- |
@@ -56,7 +58,7 @@
 | `instruction_compliance_and_constraint_adherence` | 指令遵从与约束保持 | 1.0 | 是否满足题目中明确列出的要求和限制 |
 | `engineering_quality_and_completeness` | 工程化质量与完备性 | 1.0 | 代码结构、类型、复用、测试覆盖、回归风险控制 |
 | `delivery_completeness_and_usability` | 交付完整性与可用性 | 1.0 | 是否给出验证命令、测试结果、手动验证步骤，交付是否可复核 |
-| `architecture_boundaries_and_security_compliance` | 架构边界与安全合规性 | 1.0 | 是否遵守模块边界，是否避免安全、权限、数据泄露或危险渲染问题 |
+| `architecture_boundaries_and_security_compliance` | 架构边界与安全合规性 | **2.0** | 是否遵守模块边界，是否避免安全、权限、数据泄露或危险渲染问题 |
 
 ## 分数建议
 
@@ -65,12 +67,12 @@
 - `3`：主流程部分满足，但有明显遗漏、边界缺失或验证不足。
 - `2`：只做了表面修改，关键要求缺失。
 - `1`：几乎没有有效完成该维度。
-- `0`：未尝试、方向错误、无法运行，或引入严重问题。
+- `0`：未填写（空模板状态）。
 
 ## passrate 计算
 
 ```text
-passrate = 7 个 score 的总和 / 35
+passrate = sum(score × weight) / sum(points × weight)
 ```
 
 也可以在 `D:\A3Code\Coding Trajectory` 下执行：

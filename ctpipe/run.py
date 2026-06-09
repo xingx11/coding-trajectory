@@ -12,11 +12,42 @@ from ctpipe.config import (
     BatchConfig,
     ModelConfig,
     TaskConfig,
-    build_claude_env,
+    build_validated_env,
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
 from ctpipe.trajectory import find_trajectory_for_run, parse_trajectory
+
+
+def _sanitize_run_dir(run_dir: Path) -> None:
+    """Remove untrusted config from cloned repos before execution.
+
+    Cloned repos may contain .claude/ directories or CLAUDE.md files
+    that could execute arbitrary commands when --dangerously-skip-permissions
+    is used. Remove them, then rebuild the pipeline's own settings.
+    """
+    import json as _json
+
+    # Remove untrusted .claude/ directory
+    claude_dir = run_dir / ".claude"
+    if claude_dir.is_dir():
+        import shutil
+        shutil.rmtree(claude_dir, ignore_errors=True)
+        print(f"  [security] Removed untrusted .claude/ from {run_dir.name}")
+
+    # Remove CLAUDE.md files that could inject instructions
+    for md_name in ("CLAUDE.md", "claude.md", ".claudeignore"):
+        md_path = run_dir / md_name
+        if md_path.exists() and not md_path.is_symlink():
+            md_path.unlink()
+            print(f"  [security] Removed untrusted {md_name} from {run_dir.name}")
+
+    # Rebuild pipeline's trusted settings
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    from ctpipe.prepare import SETTINGS_LOCAL
+    (claude_dir / "settings.local.json").write_text(
+        _json.dumps(SETTINGS_LOCAL, indent=2), encoding="utf-8",
+    )
 
 
 @dataclass
@@ -27,19 +58,6 @@ class TurnResult:
     stderr: str
     duration_s: float
     session_id: str = ""
-
-
-def _build_env(model_config: ModelConfig) -> dict[str, str]:
-    missing = []
-    if not model_config.auth_token:
-        missing.append("auth token")
-    if not model_config.base_url:
-        missing.append("base URL")
-    if not model_config.model:
-        missing.append("model")
-    if missing:
-        raise ValueError(f"Model config is incomplete: missing {', '.join(missing)}")
-    return build_claude_env(model_config)
 
 
 def _parse_session_id(stdout: str) -> str:
@@ -74,7 +92,6 @@ async def _run_claude_p(
     cmd = [
         "claude",
         "-p",
-        prompt,
         "--output-format",
         "json",
         "--dangerously-skip-permissions",
@@ -90,6 +107,7 @@ async def _run_claude_p(
         *cmd,
         cwd=str(cwd),
         env=env,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -102,7 +120,9 @@ async def _run_claude_p(
 
     heartbeat_task = asyncio.create_task(_heartbeat())
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode("utf-8")), timeout=timeout,
+        )
     except asyncio.TimeoutError:
         proc.kill()
         await proc.communicate()
@@ -147,7 +167,7 @@ async def run_single(
     turn_timeout: int = 900,
     total_timeout: int = 3600,
 ) -> dict[str, object]:
-    env = _build_env(model_config)
+    env = build_validated_env(model_config)
     start_time = time.time()
     turns_completed = 0
     session_id = ""
@@ -274,6 +294,9 @@ async def run_task_model(
         state.set(task.id, "run", model=model_name, status="failed", error="run dir not found")
         return
 
+    # Remove untrusted .claude/ config from cloned repos before execution
+    _sanitize_run_dir(run_dir)
+
     model_config = config.qwen if model_name == "qwen" else config.claude
     prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
     followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
@@ -298,36 +321,31 @@ async def run_all(
     turn_timeout: int = 900,
     total_timeout: int = 3600,
 ) -> None:
-    state = PipelineState(config.delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
-    sem = asyncio.Semaphore(config.max_parallel)
+    # max_parallel = number of tasks running concurrently; each task runs 2 models
+    sem = asyncio.Semaphore(config.max_parallel * 2)
+    total_tasks = len(tasks)
 
     async def run_model_bounded(task: TaskConfig, model_name: str) -> None:
         async with sem:
             await run_task_model(task, config, state, model_name, turn_timeout, total_timeout)
 
-    async def run_task_models(task: TaskConfig) -> None:
-        print(f"[{task.id}] Starting run ({', '.join(models)})...")
-        with state.batch():
-            coros = [run_model_bounded(task, m) for m in models]
-            results = await asyncio.gather(*coros, return_exceptions=True)
-            for model_name, result in zip(models, results):
-                if isinstance(result, Exception):
-                    print(f"[{task.id}/{model_name}] ERROR: {result}")
-                    state.set(task.id, "run", model=model_name, status="failed", error=str(result))
+    async def run_task_models(task: TaskConfig, index: int) -> None:
+        print(f"[{task.id}] Starting run ({index}/{total_tasks}, {', '.join(models)})...")
+        coros = [run_model_bounded(task, m) for m in models]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        for model_name, result in zip(models, results):
+            if isinstance(result, Exception):
+                print(f"[{task.id}/{model_name}] ERROR: {str(result)[:200]}")
+                state.set(task.id, "run", model=model_name, status="failed", error=str(result)[:200])
 
-    task_coros = [run_task_models(task) for task in tasks]
+    task_coros = [run_task_models(task, i + 1) for i, task in enumerate(tasks)]
     if task_coros:
-        batch_size = max(1, config.max_parallel)
-        for i in range(0, len(task_coros), batch_size):
-            batch = task_coros[i:i + batch_size]
-            batch_num = i // batch_size + 1
-            total_batches = (len(task_coros) + batch_size - 1) // batch_size
-            if total_batches > 1:
-                print(f"\n--- Batch {batch_num}/{total_batches} ---")
-            results = await asyncio.gather(*batch, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    print(f"  ERROR in batch: {result}")
+        print(f"Pipeline: {total_tasks} tasks, max {config.max_parallel} concurrent ({config.max_parallel * 2} processes)")
+        results = await asyncio.gather(*task_coros, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                print(f"  ERROR: {str(result)[:200]}")
     print("Run complete.")

@@ -11,13 +11,11 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 
-from ctpipe.config import BatchConfig, TaskConfig, select_delivery_tasks
+from ctpipe.config import BatchConfig, MODEL_SPECIFIC_STAGES, TaskConfig, select_delivery_tasks
 from ctpipe.state import PipelineState
 
 # Stages that do NOT have per-model entries.
 _MODEL_AGNOSTIC_STAGES = ("prepare", "finalize")
-# Stages that DO have per-model entries.
-_MODEL_SPECIFIC_STAGES = ("run", "collect", "score")
 # Ordered pipeline stages (no validate — it's a read-only check).
 _STAGE_ORDER = ("prepare", "run", "collect", "score", "finalize")
 # Status values that trigger a retry.
@@ -89,7 +87,7 @@ def _find_failed_entries(
                 status = _get_status(state, _Entry(task.id, stage))
                 if status in _RETRYABLE_STATUSES:
                     entries.append(_Entry(task.id, stage))
-            elif stage in _MODEL_SPECIFIC_STAGES:
+            elif stage in MODEL_SPECIFIC_STAGES:
                 for model in models:
                     status = _get_status(state, _Entry(task.id, stage, model))
                     if status in _RETRYABLE_STATUSES:
@@ -112,7 +110,7 @@ def _expand_cascade(entries: list[_Entry], models: list[str]) -> list[_Entry]:
             if downstream_stage in _MODEL_AGNOSTIC_STAGES:
                 ds_entry = _Entry(entry.task_id, downstream_stage)
                 expanded[ds_entry.label] = ds_entry
-            elif downstream_stage in _MODEL_SPECIFIC_STAGES:
+            elif downstream_stage in MODEL_SPECIFIC_STAGES:
                 # Carry the model forward from the failed entry.
                 if entry.model:
                     ds_entry = _Entry(entry.task_id, downstream_stage, entry.model)
@@ -232,13 +230,23 @@ def _mark_permanently_failed(
     return marked
 
 
-def _increment_retry_count(state: PipelineState, entries: list[_Entry]) -> None:
-    """Increment retry_count for all entries before re-execution."""
+def _increment_retry_count(
+    state: PipelineState,
+    entries: list[_Entry],
+    saved_counts: dict[_Entry, int] | None = None,
+) -> None:
+    """Increment retry_count for all entries before re-execution.
+
+    Args:
+        saved_counts: Pre-read retry counts (read before reset).
+            If None, reads current state (may be 0 after reset).
+    """
     for entry in entries:
-        info = state.get(entry.task_id, entry.stage, entry.model)
-        retry_count = info.get("retry_count", 0)
-        # Preserve retry_count across reset by setting it before execute.
-        # Since reset() deletes the entry, we set it after reset.
+        if saved_counts is not None:
+            retry_count = saved_counts.get(entry, 0)
+        else:
+            info = state.get(entry.task_id, entry.stage, entry.model)
+            retry_count = info.get("retry_count", 0)
         state.set(entry.task_id, entry.stage, entry.model,
                   status="pending", retry_count=retry_count + 1)
 
@@ -320,7 +328,7 @@ async def retry(
         print("Run 'ctpipe prepare' first to initialize the pipeline.")
         return False
 
-    state = PipelineState(delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
     tasks = select_delivery_tasks(config, task_ids)
 
     if not tasks:
@@ -374,12 +382,15 @@ async def retry(
 
         _print_round_summary(round_num, max_retries, retryable, stage_groups)
 
+        # Save retry counts BEFORE reset (reset deletes entries).
+        saved_counts = {entry: _get_retry_count(state, entry) for entry in retryable}
+
         # Reset all entries.
         reset_count = _reset_entries(state, retryable)
         print(f"  Reset {reset_count} state entries.")
 
-        # Set retry_count = old + 1 (reset deleted entries, so re-create with count).
-        _increment_retry_count(state, retryable)
+        # Set retry_count = old + 1 (using pre-reset counts).
+        _increment_retry_count(state, retryable, saved_counts)
 
         # Execute each stage in order.  Each task within a stage is isolated:
         # one task's exception does NOT block others.

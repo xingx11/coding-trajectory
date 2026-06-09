@@ -56,3 +56,7 @@ score.txt
 
 # Scripts with internal URLs
 scripts/
+
+# One-off utility scripts
+_rename_criteria.py
+fix_passrates.py

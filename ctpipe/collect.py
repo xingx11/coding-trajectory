@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from ctpipe.config import BatchConfig, TaskConfig, select_delivery_tasks
+from ctpipe.config import BatchConfig, MIN_SALVAGE_LINES, MIN_TRAJECTORY_LINES, TaskConfig, select_delivery_tasks, validate_session_id
 from ctpipe.state import PipelineState
 from ctpipe.project_hash import project_hash_dir
 from ctpipe.trajectory import find_trajectory_for_run, parse_trajectory, trajectory_filename
@@ -111,6 +111,15 @@ def collect_single(
         if not session_id and run_dir.is_dir():
             session_id = _infer_session_id(run_dir, start_time, task.id, model_name)
 
+        # Validate session_id format before using in file paths
+        if session_id:
+            try:
+                validate_session_id(session_id)
+            except ValueError:
+                print(f"  [{task.id}/{model_name}] ERROR: invalid session_id format: {session_id!r}")
+                state.set(task.id, "collect", model=model_name, status="failed", error="invalid session_id format")
+                return False
+
     if not run_dir.is_dir():
         print(f"  [{task.id}/{model_name}] ERROR: run dir not found: {run_dir}")
         state.set(
@@ -150,8 +159,6 @@ def collect_single(
         )
         return False
 
-    MIN_TRAJECTORY_LINES = 10
-    MIN_SALVAGE_LINES = 3
     min_lines = MIN_SALVAGE_LINES if is_salvage else MIN_TRAJECTORY_LINES
 
     if info.line_count < min_lines or (not is_salvage and not info.models):
@@ -228,7 +235,7 @@ def collect_single(
 
 
 def collect_all(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None, *, salvage: bool = True, force: bool = False) -> None:
-    state = PipelineState(config.delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
 

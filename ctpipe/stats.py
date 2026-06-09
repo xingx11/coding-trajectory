@@ -15,8 +15,6 @@ from ctpipe.state import PipelineState
 
 # Stages that do NOT have per-model entries.
 _MODEL_AGNOSTIC_STAGES = ("prepare", "finalize", "validate")
-# Stages that DO have per-model entries.
-_MODEL_SPECIFIC_STAGES = ("run", "collect", "score")
 # Ordered pipeline stages.
 ALL_STAGES = ("prepare", "run", "collect", "score", "finalize", "validate")
 # Status values grouped for display.
@@ -158,6 +156,49 @@ def _collect_passrate_diff(
     }
 
 
+def _collect_timing_stats(
+    state: PipelineState,
+    task_ids: list[str],
+    models: list[str],
+) -> dict[str, dict[str, float]]:
+    """Gather duration_s from run and score stages per model.
+
+    Returns {"run/model": {min, max, mean, total, count}, "score/model": ...}
+    for stage/model combinations that have data.
+    """
+    result: dict[str, dict[str, float]] = {}
+    for stage in ("run", "score"):
+        for model in models:
+            values: list[float] = []
+            for tid in task_ids:
+                info = state.get(tid, stage, model)
+                dur = info.get("duration_s")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    values.append(float(dur))
+            if values:
+                result[f"{stage}/{model}"] = {
+                    "min": min(values),
+                    "max": max(values),
+                    "mean": statistics.mean(values),
+                    "total": sum(values),
+                    "count": len(values),
+                }
+    return result
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds into a human-readable string (e.g. '2m30s', '45s')."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds) // 60
+    secs = int(seconds) % 60
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h{mins:02d}m"
+
+
 def _find_bottleneck(rows: list[dict[str, object]]) -> tuple[str, int]:
     """Return (stage_name, failed_count) for the stage with the most failures.
 
@@ -176,6 +217,26 @@ def _find_bottleneck(rows: list[dict[str, object]]) -> tuple[str, int]:
     return worst_stage, worst_failed
 
 
+def _find_slowest(
+    state: PipelineState,
+    task_ids: list[str],
+    models: list[str],
+) -> tuple[str, str, float] | None:
+    """Return (task_id, model, duration_s) for the slowest run, or None."""
+    best_tid = ""
+    best_model = ""
+    best_dur = 0.0
+    for tid in task_ids:
+        for model in models:
+            info = state.get(tid, "run", model)
+            dur = info.get("duration_s")
+            if isinstance(dur, (int, float)) and dur > best_dur:
+                best_tid, best_model, best_dur = tid, model, float(dur)
+    if best_dur > 0:
+        return best_tid, best_model, best_dur
+    return None
+
+
 def _print_table(
     stage_rows: list[dict[str, object]],
     passrate_stats: dict[str, dict[str, float]],
@@ -183,6 +244,8 @@ def _print_table(
     bottleneck: tuple[str, int],
     model_a: str,
     model_b: str,
+    timing_stats: dict[str, dict[str, float]] | None = None,
+    slowest: tuple[str, str, float] | None = None,
 ) -> None:
     """Render stats as a human-readable table."""
     print("\n" + "=" * 70)
@@ -227,12 +290,37 @@ def _print_table(
         print(f"  {model_b}>{model_a}: {int(passrate_diff['positive'])}   "
               f"{model_b}<={model_a}: {int(passrate_diff['negative'])}")
 
+    # Duration summary per stage/model
+    if timing_stats is not None:
+        hdr = f"{'Stage':<18} {'Min':>8} {'Max':>8} {'Mean':>8} {'Total':>9} {'Count':>6}"
+        print(f"\nRun duration\n{hdr}")
+        print("-" * len(hdr))
+        if timing_stats:
+            for key, d in timing_stats.items():
+                print(
+                    f"{key:<18} "
+                    f"{_fmt_duration(d['min']):>8} "
+                    f"{_fmt_duration(d['max']):>8} "
+                    f"{_fmt_duration(d['mean']):>8} "
+                    f"{_fmt_duration(d['total']):>9} "
+                    f"{int(d['count']):>6}"
+                )
+        else:
+            print("  N/A")
+
     # Bottleneck (stage with most failures)
     stage_name, failed_count = bottleneck
     if failed_count > 0:
         print(f"\nBottleneck: {stage_name} ({failed_count} task(s) failed)")
     else:
         print("\nNo failures. All stages complete or pending.")
+
+    if timing_stats is not None:
+        if slowest:
+            tid, model, dur = slowest
+            print(f"Slowest: {tid}/{model} ({_fmt_duration(dur)})")
+        else:
+            print("Slowest: N/A")
 
     print("=" * 70)
 
@@ -265,6 +353,13 @@ def _collect_per_task(
             pr = fin.get(f"{model}_passrate")
             if isinstance(pr, (int, float)) and pr > 0:
                 task_detail[f"{model}_passrate"] = round(float(pr), 4)
+        # Attach duration_s from run and score stages when available.
+        for stage in ("run", "score"):
+            for model in models:
+                info = state.get(tid, stage, model)
+                dur = info.get("duration_s")
+                if isinstance(dur, (int, float)) and dur > 0:
+                    task_detail[f"{stage}/{model}_duration_s"] = round(float(dur), 1)
         result[tid] = task_detail
     return result
 
@@ -277,6 +372,8 @@ def _print_json(
     per_task: dict[str, dict[str, str]],
     model_a: str,
     model_b: str,
+    timing_stats: dict[str, dict[str, float]] | None = None,
+    slowest: tuple[str, str, float] | None = None,
 ) -> None:
     """Render stats as structured JSON with summary and per_task sections."""
     summary: dict[str, object] = {
@@ -318,7 +415,24 @@ def _print_json(
             "negative": int(passrate_diff["negative"]),
         }
 
-    payload = {"summary": summary, "per_task": per_task}
+    payload: dict[str, object] = {"summary": summary, "per_task": per_task}
+    if timing_stats is not None:
+        slowest_task = None
+        if slowest:
+            slowest_task = {"task": slowest[0], "model": slowest[1], "duration_s": round(slowest[2], 1)}
+        payload["timing"] = {
+            "per_stage": {
+                key: {
+                    "min": round(d["min"], 1),
+                    "max": round(d["max"], 1),
+                    "mean": round(d["mean"], 1),
+                    "total": round(d["total"], 1),
+                    "count": int(d["count"]),
+                }
+                for key, d in timing_stats.items()
+            },
+            "slowest_task": slowest_task,
+        }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
@@ -327,6 +441,7 @@ def show_stats(
     task_ids: list[str] | None = None,
     models: list[str] | None = None,
     fmt: str = "table",
+    timing: bool = False,
 ) -> bool:
     """Print aggregate pipeline statistics and return True if all done."""
     models = models or ["qwen", "claude"]
@@ -341,7 +456,7 @@ def show_stats(
         return False
 
     tasks = select_delivery_tasks(config, task_ids)
-    state = PipelineState(delivery_dir / "pipeline_state.json")
+    state = PipelineState(config.state_path)
 
     if not tasks:
         print("No tasks found in delivery manifest or tasks.toml.")
@@ -353,6 +468,12 @@ def show_stats(
     passrate_stats = _collect_passrate_stats(state, tids, models)
     bottleneck = _find_bottleneck(stage_rows)
 
+    timing_stats: dict[str, dict[str, float]] | None = None
+    slowest: tuple[str, str, float] | None = None
+    if timing:
+        timing_stats = _collect_timing_stats(state, tids, models)
+        slowest = _find_slowest(state, tids, models)
+
     # Passrate diff is meaningful when at least two models are compared.
     model_a = models[0] if models else "qwen"
     model_b = models[1] if len(models) >= 2 else "claude"
@@ -360,9 +481,9 @@ def show_stats(
 
     if fmt == "json":
         per_task = _collect_per_task(state, tids, models)
-        _print_json(stage_rows, passrate_stats, passrate_diff, bottleneck, per_task, model_a, model_b)
+        _print_json(stage_rows, passrate_stats, passrate_diff, bottleneck, per_task, model_a, model_b, timing_stats, slowest)
     else:
-        _print_table(stage_rows, passrate_stats, passrate_diff, bottleneck, model_a, model_b)
+        _print_table(stage_rows, passrate_stats, passrate_diff, bottleneck, model_a, model_b, timing_stats, slowest)
 
     # Return True only when no failures and nothing pending.
     all_ok = all(

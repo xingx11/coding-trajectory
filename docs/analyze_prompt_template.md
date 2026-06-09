@@ -55,66 +55,53 @@ followups_claude = [
 
 ### 文件 2：创建 rubric 模板
 
-对于每个任务，在 `{{RUBRICS_DIR}}/qwen/` 和 `{{RUBRICS_DIR}}/claude/` 下各创建一个 `任务ID.quality.toml` 文件，包含 7 个评分标准：
+对于每个任务，在 `{{RUBRICS_DIR}}/qwen/` 和 `{{RUBRICS_DIR}}/claude/` 下各创建一个 `任务ID.quality.toml` 文件。
+
+**维度选择**：从以下 20 个候选维度中选择 7-10 个最能反映本任务质量差异的维度：
+
+| name | 适用场景 |
+|---|---|
+| `user_experience_and_interaction` | 用户体验、交互节奏 |
+| `task_planning_and_execution_control` | 计划、todo、执行控制 |
+| `semantic_understanding_and_logical_reasoning` | 意图理解、代码定位、逻辑判断 |
+| `instruction_compliance_and_constraint_adherence` | 用户约束、项目规则 |
+| `engineering_quality_and_completeness` | 代码质量、测试意识 |
+| `delivery_completeness_and_usability` | 最终产物、可运行性 |
+| `architecture_boundaries_and_security_compliance` | 架构边界、安全合规（weight=2.0） |
+| `tool_usage_and_failure_recovery` | 工具调用、失败恢复 |
+| `evidence_grounding_and_trace_fidelity` | 证据一致性、虚假交付 |
+| `testing_and_verification_rigor` | 测试、构建、lint |
+| `context_exploration_and_code_navigation` | 文件读取、代码定位 |
+| `requirements_clarification_and_scope_control` | 需求澄清、范围控制 |
+| `environment_and_dependency_handling` | 依赖、环境、版本 |
+| `attachment_and_artifact_handling` | PDF、图片、zip 等附件 |
+| `external_research_and_source_use` | web search、GitHub、文档 |
+| `custom_tool_and_protocol_compliance` | MCP、skill、内部工具 |
+| `parallel_workflow_coordination` | 多模块、并行任务 |
+| `security_privacy_and_secret_handling` | token、secret、auth |
+| `maintainability_and_change_minimality` | diff 范围、可维护性 |
+| `final_response_and_handoff_quality` | 最终回复、交接质量 |
+
+选择规则：
+1. 基于任务的具体特征选择（bug-fix 应考虑 `tool_usage_and_failure_recovery`、`testing_and_verification_rigor`；feature 应考虑 `context_exploration_and_code_navigation`、`maintainability_and_change_minimality` 等）
+2. 如果某个维度对本任务没有可观察证据，不要选择它
+3. `architecture_boundaries_and_security_compliance`（weight=2.0）通常应选择
+
+**description 定制化（极其重要）**：
+
+每个选中维度的 description 必须根据当前项目和任务量身定制：
+
+1. **保留 1-5 分档位结构**：必须包含 1 分到 5 分各档位的具体定义
+2. **融入项目特征**：把项目名称、技术栈、具体问题融入各档位描述中
+3. 不能使用通用模板，必须让人一看就知道这是针对什么项目什么任务的评分标准
+4. 使用中文，写成一行 TOML 字符串
+
+定制化示例（以 turbulenz_engine 键盘事件修复任务为例）：
 
 ```toml
 [[criterion]]
-name = "user_experience_and_interaction"
-description = "Evaluates whether ...（根据任务内容编写）"
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
-name = "task_planning_and_execution_control"
-description = "Evaluates whether ..."
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
 name = "semantic_understanding_and_logical_reasoning"
-description = "Evaluates whether ..."
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
-name = "instruction_compliance_and_constraint_adherence"
-description = "Evaluates whether ..."
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
-name = "engineering_quality_and_completeness"
-description = "Evaluates whether ..."
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
-name = "delivery_completeness_and_usability"
-description = "Evaluates whether ..."
-type = "likert"
-points = 5
-weight = 1.0
-score = 0
-rationale = ""
-
-[[criterion]]
-name = "architecture_boundaries_and_security_compliance"
-description = "Evaluates whether ..."
+description = "在 turbulenz_engine 输入设备键盘事件重复触发修复任务中，模型对 onFocusIn/onFocusOut 事件注册链路的理解和修复逻辑推理是否准确？1分：完全误解键盘事件重复触发的根因，把问题归到无关模块。2分：定位到 inputapp 但修复方案不对，函数引用不一致导致 removeEventListener 无效。3分：理解主链路但遗漏鼠标/触摸事件的类似问题。4分：正确定位并修复键盘事件链路，函数引用一致。5分：精准定位 inputapp.ts 和 inputdevice.ts 的事件注册逻辑，用最小改动修复且覆盖所有输入类型"
 type = "likert"
 points = 5
 weight = 1.0
@@ -122,7 +109,16 @@ score = 0
 rationale = ""
 ```
 
-每个 description 必须以 "Evaluates whether" 开头，针对当前任务的具体内容编写。qwen 和 claude 两个目录下同一任务的 rubric 内容相同。
+不合格示例（通用模板，禁止使用）：
+
+```toml
+description = "模型理解意图并进行逻辑推理的准确性如何？1分：完全误解意图...5分：精准整合上下文..."
+```
+
+其他字段固定值：`type = "likert"`、`points = 5`、`score = 0`、`rationale = ""`。
+`weight`：`architecture_boundaries_and_security_compliance` 为 `2.0`，其余为 `1.0`。
+
+qwen 和 claude 两个目录下同一任务的 rubric 内容必须相同（相同维度、相同定制化 description）。
 
 ## 任务 ID
 

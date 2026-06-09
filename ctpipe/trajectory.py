@@ -18,6 +18,7 @@ class TrajectoryInfo:
     first_user_ts: str | None = None
     last_ts: str | None = None
     line_count: int = 0
+    user_turns: int = 0
 
     @property
     def detected_provider(self) -> str:
@@ -75,7 +76,9 @@ def parse_trajectory(jsonl_path: Path) -> TrajectoryInfo:
                 continue
             if not isinstance(obj, dict):
                 continue
-            if obj.get("sessionId"):
+            if obj.get("type") == "user":
+                info.user_turns += 1
+            if obj.get("sessionId") and not info.session_id:
                 info.session_id = obj["sessionId"]
             if obj.get("cwd"):
                 info.cwd_values.add(obj["cwd"])
@@ -150,7 +153,7 @@ def find_trajectory_for_run(
     return candidates[0][0]
 
 
-def extract_for_scoring(jsonl_path: Path, max_chars: int = 100_000) -> str:
+def extract_for_scoring(jsonl_path: Path, max_chars: int = 50_000) -> str:
     """Extract a condensed text representation of the trajectory for AI scoring.
 
     Keeps user messages, assistant text, tool call summaries.
