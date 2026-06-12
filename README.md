@@ -52,7 +52,7 @@
 │  └─ claude/                 #   Claude 评分模板（由 gen 自动生成）
 ├─ delivery_YYYYMMDD/         # 交付批次（由 pipeline 自动创建）
 ├─ project_pool.json          # 项目池（由 pool generate 生成，管理员维护）
-├─ pool_assignments.json      # 人员项目分配（由 pool assign 生成）
+├─ pool_assignments.json      # 人员项目分配（由 pool assign 生成，本地文件不提交）
 ├─ tasks.toml                 # 任务配置（核心，由 gen 生成或手动编写）
 ├─ .env                       # API 密钥（不提交，需从 .env.template 创建）
 └─ .env.template              # 环境变量模板
@@ -449,7 +449,7 @@ python -m ctpipe collect
 1. 根据运行目录路径计算 Claude 项目 hash，定位 `~/.claude/projects/<hash>/` 下的 JSONL 文件
 2. 按运行开始时间和 session_id 筛选匹配的 JSONL
 3. 解析 JSONL 验证模型提供商（检测 model 字段中是否包含 "qwen" 或 "claude"）
-4. 复制并重命名为标准格式 `CT-xxxx.jsonl`，放入交付目录
+4. 复制并重命名为 `{模型}-{编号}.jsonl`（如 `qwen-0001.jsonl`、`claude-0001.jsonl`；任务编号本身仍为 `CT-xxxx`），放入交付目录；读取端同时兼容旧的 `CT-xxxx.jsonl` 命名，旧批次无需迁移
 
 #### Stage 4：Score — AI 自动评分
 
@@ -462,7 +462,7 @@ python -m ctpipe score
 2. 构建中文评分 prompt，包含任务背景（项目名、技术栈、任务标题、验收标准、项目概要）、评分维度定义、评分规则（1-5 分）、rationale 写作要求和 Bad Pattern 识别指引
 3. 成对评分：先评 Qwen（AI 自选 7-10 个维度），再评 Claude（使用 Qwen 选定的相同维度），保证 passrate 可比
 4. 通过 `claude -p` 调用 AI 评分，解析返回的 TOML 并写入交付目录
-5. 验证输出：维度名合法性、score 1-5 整数、rationale 非空、维度数量 6-10
+5. 验证输出：维度名合法性、score 1-5 整数、rationale 非空、维度数量 7-10
 6. 解析失败时保存为 `.draft.txt` 供人工处理
 
 #### Stage 5：Finalize — 汇总提交

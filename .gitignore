@@ -40,8 +40,9 @@ htmlcov/
 Thumbs.db
 Desktop.ini
 
-# Local tool caches
-.claude/
+# Local tool caches (keep shared slash commands, ignore local settings)
+.claude/*
+!.claude/commands/
 
 # Delivery batches (contain trajectory data and scores)
 delivery_*/
