@@ -32,6 +32,15 @@ from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajec
 QWEN_MODEL_KEYWORDS = ("qwen",)
 CLAUDE_MODEL_KEYWORDS = ("claude", "anthropic")
 
+# Keywords indicating negative evidence in rationale (used in score-rationale contradiction check)
+_NEG_KEYWORDS = ("没有", "没看到", "未完成", "不够", "缺少", "缺乏", "不足",
+                 "欠缺", "偏弱", "不完整", "还差", "没做", "不到位", "不算完成")
+
+# Keywords indicating strong positive evidence in rationale (used in low-score contradiction check)
+_POS_KEYWORDS = ("完整实现", "全部完成", "准确定位", "正确修复", "覆盖全面",
+                 "高质量", "完美", "出色", "处理得当", "完整覆盖",
+                 "成功修复", "成功实现", "精准定位", "全面覆盖")
+
 
 def _count_turns(jsonl_path: Path) -> tuple[int, list[str], str, set[str]]:
     """Parse trajectory JSONL and return (turn_count, models, session_id, issues)."""
@@ -95,6 +104,7 @@ def check(
 
     for task in tasks:
         task_stats: dict[str, str] = {}
+        parsed_criteria: dict[str, list] = {}  # model -> list[Criterion]
         sub_id = submission_id_map.get(task.id, task.id)
         row = submission_rows.get(sub_id)
 
@@ -135,7 +145,7 @@ def check(
                     )
 
             # --- Score checks ---
-            score_path = delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+            score_path = config.resolve_score_path(task.id, model_name)
             if not score_path.exists():
                 issues.append(f"{prefix} score file missing")
                 continue
@@ -170,6 +180,26 @@ def check(
             passrate = calc_passrate(criteria)
             task_stats[f"{model_name}_passrate"] = f"{passrate:.4f}"
             task_stats[f"{model_name}_criteria"] = ",".join(c.name for c in criteria)
+            parsed_criteria[model_name] = criteria
+
+            # --- Score-rationale contradiction check ---
+            for ci, c in enumerate(criteria, 1):
+                if c.score >= 4 and c.rationale:
+                    neg_hits = [kw for kw in _NEG_KEYWORDS if kw in c.rationale]
+                    if neg_hits:
+                        warnings.append(
+                            f"[{task.id}/{model_name}] criterion {ci} ({c.name}): "
+                            f"score={c.score} but rationale contains negative keywords "
+                            f"{neg_hits}"
+                        )
+                if c.score <= 2 and c.rationale:
+                    pos_hits = [kw for kw in _POS_KEYWORDS if kw in c.rationale]
+                    if pos_hits:
+                        warnings.append(
+                            f"[{task.id}/{model_name}] criterion {ci} ({c.name}): "
+                            f"score={c.score} but rationale contains positive keywords "
+                            f"{pos_hits}"
+                        )
 
             if row:
                 csv_pr = row.get(f"{model_name} passrate", "")
@@ -195,7 +225,34 @@ def check(
                 diff_parts.append(f"only in qwen: {', '.join(sorted(only_qwen))}")
             if only_claude:
                 diff_parts.append(f"only in claude: {', '.join(sorted(only_claude))}")
-            warnings.append(f"[{task.id}] criterion mismatch between qwen/claude: {'; '.join(diff_parts)}")
+            issues.append(f"[{task.id}] criterion name mismatch between qwen/claude: {'; '.join(diff_parts)}")
+
+        # --- Cross-model description consistency check ---
+        qwen_crit = parsed_criteria.get("qwen", [])
+        claude_crit = parsed_criteria.get("claude", [])
+        if qwen_crit and claude_crit:
+            q_desc = {c.name: c.description for c in qwen_crit}
+            c_desc = {c.name: c.description for c in claude_crit}
+            shared_names = set(q_desc) & set(c_desc)
+            for name in sorted(shared_names):
+                if q_desc[name] != c_desc[name]:
+                    issues.append(f"[{task.id}] criterion '{name}' has different descriptions between qwen and claude")
+
+        # --- Cross-model trajectory turn parity check ---
+        qwen_turns_str = task_stats.get("qwen_turns", "")
+        claude_turns_str = task_stats.get("claude_turns", "")
+        if qwen_turns_str and claude_turns_str:
+            qwen_turns = int(qwen_turns_str)
+            claude_turns = int(claude_turns_str)
+            turn_diff = abs(qwen_turns - claude_turns)
+            if turn_diff >= 2:
+                fewer = "qwen" if qwen_turns < claude_turns else "claude"
+                warnings.append(
+                    f"[{task.id}] trajectory turn imbalance: "
+                    f"qwen={qwen_turns}, claude={claude_turns} "
+                    f"(diff={turn_diff}, {fewer} may be truncated — "
+                    f"scoring fairness at risk)"
+                )
 
         # --- Cross-model threshold checks ---
         qwen_pr = float(task_stats.get("qwen_passrate", "0") or "0")
@@ -211,6 +268,16 @@ def check(
         metadata_path = delivery_dir / "metadata" / f"{task.id}.md"
         if not metadata_path.exists():
             issues.append(f"[{task.id}] metadata file missing")
+
+        # --- Prompt/followup parity check ---
+        q_followups = getattr(task, "followups_qwen", None) or []
+        c_followups = getattr(task, "followups_claude", None) or []
+        if len(q_followups) != len(c_followups):
+            warnings.append(
+                f"[{task.id}] followup count mismatch: "
+                f"qwen={len(q_followups)}, claude={len(c_followups)} "
+                f"(prompt fairness at risk)"
+            )
 
         stats[task.id] = task_stats
 

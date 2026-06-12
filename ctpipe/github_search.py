@@ -169,6 +169,9 @@ def search_projects(
     language: str,
     count: int = 5,
     min_stars: int = 50,
+    max_stars: int = 5000,
+    sort: str = "stars",
+    order: str = "desc",
     exclude_repos: set[str] | None = None,
     github_token: str = "",
     http_proxy: str = "",
@@ -181,19 +184,21 @@ def search_projects(
     query_parts = [topic_terms]
     if gh_lang:
         query_parts.append(f"language:{gh_lang}")
-    query_parts.append(f"stars:{min_stars}..5000")
+    query_parts.append(f"stars:{min_stars}..{max_stars}")
     query_parts.append("fork:false")
     query_parts.append("archived:false")
     query_parts.append("size:<100000")
     query = " ".join(query_parts)
 
-    params = urllib.parse.urlencode({
+    per_page = min(count, 100)
+    params: dict[str, str | int] = {
         "q": query,
-        "sort": "stars",
-        "order": "desc",
-        "per_page": min(count * 3, 30),
-    })
-    base_url = f"https://api.github.com/search/repositories?{params}"
+        "order": order,
+        "per_page": per_page,
+    }
+    if sort:
+        params["sort"] = sort
+    base_url = f"https://api.github.com/search/repositories?{urllib.parse.urlencode(params)}"
 
     headers = {
         "Accept": "application/vnd.github.v3+json",
@@ -203,7 +208,7 @@ def search_projects(
         headers["Authorization"] = f"token {github_token}"
 
     repos: list[GitHubRepo] = []
-    max_pages = max(3, 1 + len(exclude) // 30)
+    max_pages = max(1 + count // per_page, 1 + len(exclude) // per_page)
 
     for page in range(1, max_pages + 1):
         url = f"{base_url}&page={page}"

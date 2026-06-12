@@ -17,37 +17,13 @@ from ctpipe.config import (
     BatchConfig,
     ModelConfig,
     TaskConfig,
+    model_stem,
     write_task_manifest,
 )
 from ctpipe.finalize import _update_metadata_files, _write_submission_csv, finalize
 from ctpipe.state import PipelineState
 from ctpipe.toml_utils import Criterion, write_quality_toml
-
-
-def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
-    return BatchConfig(
-        delivery_date="20990101",
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-        person_id="99",
-    )
-
-
-def _make_task(task_id: str = "CT-0001", task_type: str = "bug-fix") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type=task_type,
-        domain="web_frontend",
-        language="ts",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-        bad_pattern="lazy_shortcut",
-    )
+from conftest import build_config, make_task
 
 
 def _setup_task_scores(
@@ -65,7 +41,7 @@ def _setup_task_scores(
     """
     traj_dir = delivery_dir / "trajectories" / model_name
     traj_dir.mkdir(parents=True, exist_ok=True)
-    traj_file = traj_dir / f"{task_id}.jsonl"
+    traj_file = traj_dir / f"{model_stem(task_id, model_name)}.jsonl"
     traj_file.write_text(
         json.dumps({"sessionId": session_id}) + "\n",
         encoding="utf-8",
@@ -81,12 +57,12 @@ def _setup_task_scores(
         )
         for name in names
     ]
-    write_quality_toml(score_dir / f"{task_id}.quality.toml", criteria)
+    write_quality_toml(score_dir / f"{model_stem(task_id, model_name)}.quality.toml", criteria)
 
     state.set(
         task_id, "collect", model=model_name,
         status="done", session_id=session_id, model_detected=model_name,
-        jsonl_path=f"trajectories/{model_name}/{task_id}.jsonl",
+        jsonl_path=f"trajectories/{model_name}/{model_stem(task_id, model_name)}.jsonl",
     )
     state.set(
         task_id, "run", model=model_name,
@@ -103,12 +79,12 @@ def _setup_task_scores(
 class FinalizeMultiTaskCSVTest(unittest.TestCase):
 
     def test_three_tasks_produce_three_csv_rows_with_all_columns(self) -> None:
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", bad_pattern="lazy_shortcut") for i in range(1, 4)]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config(tasks)
+                config = build_config(tasks)
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, tasks)
@@ -155,11 +131,11 @@ class FinalizeDualModelThresholdTest(unittest.TestCase):
         qwen_score: int,
         claude_score: int,
     ) -> str:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task])
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -218,12 +194,12 @@ class WriteSubmissionCSVFieldMappingTest(unittest.TestCase):
     def test_all_key_map_entries_produce_correct_csv_values(self) -> None:
         row = {
             "id": "CT-9999",
-            "qwen_trajectory": "trajectories/qwen/CT-9999.jsonl",
+            "qwen_trajectory": "trajectories/qwen/qwen-9999.jsonl",
             "qwen_session_id": "qw-session-abc",
-            "qwen_score_path": "scores/qwen/CT-9999.quality.toml",
-            "claude_trajectory": "trajectories/claude/CT-9999.jsonl",
+            "qwen_score_path": "scores/qwen/qwen-9999.quality.toml",
+            "claude_trajectory": "trajectories/claude/claude-9999.jsonl",
             "claude_session_id": "cl-session-xyz",
-            "claude_score_path": "scores/claude/CT-9999.quality.toml",
+            "claude_score_path": "scores/claude/claude-9999.quality.toml",
             "qwen_passrate": "0.5000",
             "claude_passrate": "0.8500",
             "task_type": "bug-fix",
@@ -312,11 +288,11 @@ class UpdateMetadataFilesRegexTest(unittest.TestCase):
         qwen_passrate: str = "0.5000",
         claude_passrate: str = "0.9000",
     ) -> str:
-        task = _make_task(task_id)
+        task = make_task(task_id, bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task])
                 delivery_dir = config.delivery_dir
                 metadata_dir = delivery_dir / "metadata"
                 metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -403,11 +379,11 @@ class UpdateMetadataFilesRegexTest(unittest.TestCase):
 
     def test_already_filled_field_not_overwritten(self) -> None:
         """A field that already has a value (non-empty) should not be touched."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task])
                 delivery_dir = config.delivery_dir
                 metadata_dir = delivery_dir / "metadata"
                 metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -449,14 +425,14 @@ class FinalizePartialTasksIdConsistencyTest(unittest.TestCase):
 
     def test_second_task_keeps_full_run_id(self) -> None:
         """3 same-type tasks: partial finalize of CT-0002 must get seq=02."""
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", bad_pattern="lazy_shortcut") for i in range(1, 4)]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config(tasks)
+                config = build_config(tasks)
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, tasks)

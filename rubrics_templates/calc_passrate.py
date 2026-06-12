@@ -1,34 +1,34 @@
+"""Calculate pass rates for quality.toml rubric files.
+
+Detects unscored templates and incomplete rubrics, emitting clear warnings
+instead of silently printing 0.0000. Use --strict to make these warnings
+fatal (non-zero exit code).
+"""
+
 from __future__ import annotations
 
 import argparse
 import sys
-import tomllib
 from pathlib import Path
 
-
-def calc_passrate(path: Path) -> float:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    criteria = data.get("criterion", [])
-    if not criteria:
-        raise ValueError(f"{path} has no [[criterion]] entries")
-
-    total_score = 0.0
-    total_points = 0.0
-    for item in criteria:
-        score = float(item.get("score", 0))
-        points = float(item.get("points", 5))
-        weight = float(item.get("weight", 1))
-        total_score += score * weight
-        total_points += points * weight
-
-    if total_points <= 0:
-        raise ValueError(f"{path} has non-positive total points")
-    return total_score / total_points
+from ctpipe.toml_utils import (
+    calc_passrate,
+    is_complete_rubric,
+    is_unscored_template,
+    read_quality_toml,
+)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Calculate pass rate for quality.toml files.")
+    parser = argparse.ArgumentParser(
+        description="Calculate pass rate for quality.toml files.",
+    )
     parser.add_argument("paths", nargs="+", help="TOML file or directory paths")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit non-zero if any file is unscored or incomplete",
+    )
     args = parser.parse_args()
 
     files: list[Path] = []
@@ -39,14 +39,46 @@ def main() -> int:
         else:
             files.append(path)
 
+    has_issue = False
     for path in files:
         try:
-            rate = calc_passrate(path)
+            criteria = read_quality_toml(path)
+        except Exception as exc:
+            print(f"{path}: ERROR: {exc}", file=sys.stderr)
+            return 1
+
+        if not criteria:
+            print(f"{path}: ERROR: no [[criterion]] entries", file=sys.stderr)
+            return 1
+
+        if is_unscored_template(criteria):
+            print(
+                f"{path}: UNSCORED — all {len(criteria)} criteria have "
+                f"score=0 and empty rationale",
+                file=sys.stderr,
+            )
+            has_issue = True
+            continue
+
+        if not is_complete_rubric(criteria):
+            scored_n = sum(1 for c in criteria if c.score >= 1 and c.rationale)
+            print(
+                f"{path}: INCOMPLETE — {scored_n}/{len(criteria)} criteria "
+                f"fully scored",
+                file=sys.stderr,
+            )
+            has_issue = True
+            continue
+
+        try:
+            rate = calc_passrate(criteria)
         except Exception as exc:
             print(f"{path}: ERROR: {exc}", file=sys.stderr)
             return 1
         print(f"{path}: {rate:.4f}")
 
+    if args.strict and has_issue:
+        return 1
     return 0
 
 

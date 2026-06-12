@@ -9,6 +9,7 @@ from ctpipe.config import (
     VALID_TASK_TYPES,
     BatchConfig,
     check_passrate_thresholds,
+    model_stem,
     select_delivery_tasks,
 )
 from ctpipe.finalize import assign_submission_ids
@@ -16,7 +17,7 @@ from ctpipe.toml_utils import calc_passrate, is_complete_rubric, is_unscored_tem
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 
-def validate(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None) -> bool:
+def validate(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None, *, dry_run: bool = False, as_json: bool = False) -> bool | dict:
     # Always compute submission IDs from the full task list so that
     # sequence numbers stay consistent whether or not --tasks is used.
     all_tasks = select_delivery_tasks(config, task_ids=None)
@@ -25,6 +26,79 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
     delivery_dir = config.delivery_dir
+
+    if dry_run:
+        checks = [
+            "metadata existence",
+            "task_type / bad_pattern validity",
+            "submission row presence & submission ID mapping",
+            "trajectory existence & parse validity",
+            "trajectory provider & session_id consistency",
+            "score file existence & completeness",
+            "passrate calculation & CSV consistency",
+            "passrate threshold checks (qwen < 0.7, gap > 0.25)",
+        ]
+
+        tasks_data = []
+        for task in tasks:
+            sub_id = submission_id_map.get(task.id, task.id)
+            meta = delivery_dir / "metadata" / f"{task.id}.md"
+            models_info = {}
+            for model_name in models:
+                traj = config.resolve_trajectory_path(task.id, model_name)
+                score = config.resolve_score_path(task.id, model_name)
+                models_info[model_name] = {
+                    "trajectory_exists": traj.exists(),
+                    "score_exists": score.exists(),
+                }
+            tasks_data.append({
+                "task_id": task.id, "submission_id": sub_id,
+                "metadata_exists": meta.exists(),
+                "models": models_info,
+            })
+
+        if as_json:
+            return {
+                "delivery_dir": str(delivery_dir),
+                "submission_csv": str(delivery_dir / "submission.csv"),
+                "submission_csv_exists": (delivery_dir / "submission.csv").exists(),
+                "checks": checks,
+                "tasks": tasks_data,
+                "summary": {
+                    "total": len(tasks),
+                    "trajectories": len(tasks) * len(models),
+                    "scores": len(tasks) * len(models),
+                },
+            }
+
+        print("=" * 60)
+        print("  DRY RUN: validate")
+        print("=" * 60)
+        print(f"Delivery: {delivery_dir.name}")
+        print(f"Tasks:    {len(tasks)}")
+        print(f"Models:   {', '.join(models)}")
+        print(f"Submission CSV: {delivery_dir / 'submission.csv'}"
+              f"{' (exists)' if (delivery_dir / 'submission.csv').exists() else ' (missing)'}")
+
+        print(f"\nChecks to perform ({len(checks)}):")
+        for check in checks:
+            print(f"  - {check}")
+
+        print(f"\nFiles to validate per task:")
+        for t in tasks_data:
+            print(f"\n  [{t['task_id']}] -> {t['submission_id']}")
+            print(f"    metadata:  {'OK' if t['metadata_exists'] else 'MISSING'}")
+            for model_name in models:
+                mi = t["models"][model_name]
+                print(f"    {model_name}:")
+                print(f"      trajectory: {'OK' if mi['trajectory_exists'] else 'MISSING'}")
+                print(f"      score:      {'OK' if mi['score_exists'] else 'MISSING'}")
+
+        print(f"\nTotal: {len(tasks)} task(s), "
+              f"{len(tasks) * len(models)} trajectory(ies), "
+              f"{len(tasks) * len(models)} score file(s)")
+        return True
+
     issues: list[str] = []
 
     if not tasks:
@@ -64,7 +138,7 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
             if not trajectory_path:
                 issues.append(
                     f"[{task.id}/{model_name}] trajectory missing: "
-                    f"trajectories/{model_name}/{trajectory_filename(task.id)}"
+                    f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}"
                 )
                 continue
 
@@ -86,7 +160,7 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                     f"[{task.id}/{model_name}] provider mismatch: detected {info.detected_provider}"
                 )
 
-            expected_rel = f"trajectories/{model_name}/{trajectory_filename(task.id)}"
+            expected_rel = f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}"
             actual_rel = trajectory_path.relative_to(delivery_dir).as_posix()
             if row:
                 rel_key = f"{model_name} 本地trajectory"
@@ -105,14 +179,15 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                     )
 
                 score_key = f"{model_name} rubrics 人工评分"
-                expected_score = f"scores/{model_name}/{task.id}.quality.toml"
-                if row.get(score_key, "") != expected_score:
+                expected_new = f"scores/{model_name}/{model_stem(task.id, model_name)}.quality.toml"
+                expected_legacy = f"scores/{model_name}/{task.id}.quality.toml"
+                if row.get(score_key, "") not in (expected_new, expected_legacy):
                     issues.append(
                         f"[{task.id}/{model_name}] submission score path mismatch: "
-                        f"{row.get(score_key, '')!r} != {expected_score!r}"
+                        f"{row.get(score_key, '')!r} != {expected_new!r}"
                     )
 
-            score_path = delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+            score_path = config.resolve_score_path(task.id, model_name)
             if not score_path.exists():
                 issues.append(f"[{task.id}/{model_name}] score file missing: {score_path.name}")
                 continue

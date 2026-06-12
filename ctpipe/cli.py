@@ -14,6 +14,11 @@ def main() -> int:
     )
     parser.add_argument("--config", default="tasks.toml", help="Path to tasks.toml")
     parser.add_argument("--env", default=".env", help="Path to .env file")
+    parser.add_argument("--delivery-date", help="Override delivery date from tasks.toml (format: YYYYMMDD)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Preview execution plan without performing any actions")
+    parser.add_argument("--json", action="store_true", dest="json_output",
+                        help="Output dry-run execution plan as structured JSON (requires --dry-run)")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -53,7 +58,7 @@ def main() -> int:
     p_gen.add_argument("--task-type", help="Filter by task type (e.g. bug-fix, feature)")
     p_gen.add_argument("--from-local", help="Use a local project path instead of searching GitHub")
     p_gen.add_argument("--clone-dir", help="Directory to clone projects into (default: runs_root)")
-    p_gen.add_argument("--dry-run", action="store_true", help="Preview without cloning or writing")
+    p_gen.add_argument("--dry-run", action="store_true", dest="gen_dry_run", help="Preview without cloning or writing")
     p_gen.add_argument("--clone-only", action="store_true", help="Only search and clone repos (skip AI task generation)")
     p_gen.add_argument("--analyze", action="store_true", help="Use Claude Code to analyze a local project and write task entries directly")
     p_gen.add_argument("--gen-timeout", type=int, default=900, help="Total timeout per task generation in seconds (default: 900)")
@@ -91,6 +96,15 @@ def main() -> int:
     p_stats.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
     p_stats.add_argument("--format", choices=["table", "json"], default="table", dest="fmt")
     p_stats.add_argument("--timing", action="store_true", default=False, help="Include run/score duration statistics")
+    p_stats.add_argument("--filter", type=str, default=None, dest="filter_expr",
+                         help="Filter expression, e.g. \"task_type = 'bug-fix' AND qwen_passrate < 0.5\"")
+    p_stats.add_argument("--group-by", type=str, default=None, dest="group_by",
+                         help="Comma-separated fields for passrate grouping, e.g. \"task_type,domain\"")
+
+    p_health = sub.add_parser("health", help="Structured JSON pipeline health check (overall_status, stage_summary, threshold_violations, integrity_issues)")
+    p_health.add_argument("--tasks", nargs="*")
+    p_health.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
+    p_health.add_argument("--output", help="Write JSON report to file (default: stdout)")
 
     p_retry = sub.add_parser("retry", help="Auto-retry failed/partial pipeline tasks")
     p_retry.add_argument("--tasks", nargs="*", help="Specific task IDs to retry")
@@ -101,7 +115,7 @@ def main() -> int:
     p_retry.add_argument("--max-retries", type=int, default=2, help="Max retry attempts per entry (default: 2)")
     p_retry.add_argument("--turn-timeout", type=int, default=900, help="Timeout per turn in seconds")
     p_retry.add_argument("--total-timeout", type=int, default=3600, help="Total timeout per task and model")
-    p_retry.add_argument("--dry-run", action="store_true", help="Preview what would be retried")
+    p_retry.add_argument("--dry-run", action="store_true", dest="retry_dry_run", help="Preview what would be retried")
     p_retry.add_argument("--no-cascade", action="store_true", help="Don't cascade retries to downstream stages")
 
     p_clean = sub.add_parser("clean", help="Post-delivery cleanup of runs, cache, and old deliveries")
@@ -109,12 +123,27 @@ def main() -> int:
     p_clean.add_argument("--no-runs", action="store_true", help="Skip cleaning runs/ directories")
     p_clean.add_argument("--cache", action="store_true", help="Also clean ~/.claude/projects/ JSONL cache")
     p_clean.add_argument("--old-deliveries", action="store_true", help="Also remove old delivery_* directories")
-    p_clean.add_argument("--dry-run", action="store_true", help="Preview what would be deleted")
+    p_clean.add_argument("--dry-run", action="store_true", dest="clean_dry_run", help="Preview what would be deleted")
 
     p_export = sub.add_parser("export", help="Export delivery results as a structured JSON report")
     p_export.add_argument("--tasks", nargs="*", help="Specific task IDs to include")
     p_export.add_argument("--models", nargs="*", choices=["qwen", "claude"], default=["qwen", "claude"])
     p_export.add_argument("--output", help="Output file path (default: stdout)")
+
+    p_pool = sub.add_parser("pool", help="Manage project pool for cross-person dedup")
+    p_pool.add_argument("action", choices=["generate", "assign", "status"],
+                        help="generate: search repos; assign: split by person; status: show usage")
+    p_pool.add_argument("--weights", help="Path to xlsx weights file (required for generate, optional for assign)")
+    p_pool.add_argument("--persons", type=int, help="Number of persons (required for assign)")
+    p_pool.add_argument("--person", help="Person ID for status detail")
+    p_pool.add_argument("--per-project", type=int, default=5,
+                        help="Tasks per project (default: 5)")
+    p_pool.add_argument("--tasks-per-person", type=int, default=45,
+                        help="Tasks per person for proportional assignment (default: 45)")
+    p_pool.add_argument("--source", choices=["github", "gitee"], default="github",
+                        help="Search source (default: github)")
+    p_pool.add_argument("--buffer", type=float, default=1.5,
+                        help="Buffer multiplier for pool size (default: 1.5)")
 
     args = parser.parse_args()
     base_dir = Path(__file__).resolve().parent.parent
@@ -124,32 +153,42 @@ def main() -> int:
     from ctpipe.config import load_config
 
     config = load_config(config_path, env_path)
-    result: int | bool | None = None
+
+    if args.delivery_date:
+        from ctpipe.config import validate_delivery_date
+        validate_delivery_date(args.delivery_date)
+        config.delivery_date = args.delivery_date
+
+    result: int | bool | dict | None = None
+    aj = args.json_output
 
     if args.command == "prepare":
         from ctpipe.prepare import prepare
-        result = prepare(config, args.tasks)
+        result = prepare(config, args.tasks, dry_run=args.dry_run, as_json=aj)
 
     elif args.command == "run":
         from ctpipe.run import run_all
-        result = asyncio.run(run_all(config, args.tasks, args.models, args.turn_timeout, args.total_timeout))
+        result = asyncio.run(run_all(config, args.tasks, args.models, args.turn_timeout, args.total_timeout,
+                                     dry_run=args.dry_run, as_json=aj))
 
     elif args.command == "collect":
         from ctpipe.collect import collect_all
-        result = collect_all(config, args.tasks, args.models, salvage=not args.no_salvage, force=args.force)
+        result = collect_all(config, args.tasks, args.models, salvage=not args.no_salvage, force=args.force,
+                             dry_run=args.dry_run, as_json=aj)
 
     elif args.command == "score":
         from ctpipe.score import score_all
         result = asyncio.run(score_all(config, args.tasks, args.models,
-                                       auto_rescore=args.auto_rescore))
+                                       auto_rescore=args.auto_rescore,
+                                       dry_run=args.dry_run, as_json=aj))
 
     elif args.command == "finalize":
         from ctpipe.finalize import finalize
-        result = finalize(config, args.tasks, args.models)
+        result = finalize(config, args.tasks, args.models, dry_run=args.dry_run, as_json=aj)
 
     elif args.command == "validate":
         from ctpipe.validate import validate
-        result = validate(config, args.tasks, args.models)
+        result = validate(config, args.tasks, args.models, dry_run=args.dry_run, as_json=aj)
 
     elif args.command == "gen":
         from ctpipe.gen import generate
@@ -165,7 +204,7 @@ def main() -> int:
             task_type=args.task_type,
             from_local=args.from_local,
             clone_dir=clone_dir_path,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run or args.gen_dry_run,
             clone_only=args.clone_only,
             analyze=args.analyze,
             total_timeout=args.gen_timeout,
@@ -174,13 +213,19 @@ def main() -> int:
         ))
 
     elif args.command == "all":
-        result = _run_all_stages(config, args)
+        result = _run_all_stages(config, args, dry_run=args.dry_run, as_json=aj)
 
     elif args.command == "check":
+        if args.dry_run or aj:
+            print("ERROR: 'check' does not support --dry-run/--json")
+            return 2
         from ctpipe.check import check
         result = check(config, args.tasks, args.models)
 
     elif args.command == "rescore":
+        if args.dry_run or aj:
+            print("ERROR: 'rescore' does not support --dry-run/--json")
+            return 2
         from ctpipe.rescore import rescore_all
         result = asyncio.run(rescore_all(config, args.tasks, args.models))
 
@@ -194,13 +239,30 @@ def main() -> int:
             max_retries=args.max_retries,
             turn_timeout=args.turn_timeout,
             total_timeout=args.total_timeout,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run or args.retry_dry_run,
             cascade=not args.no_cascade,
         ))
 
     elif args.command == "stats":
         from ctpipe.stats import show_stats
-        result = show_stats(config, args.tasks, args.models, args.fmt, args.timing)
+        result = show_stats(config, args.tasks, args.models, args.fmt, args.timing,
+                            filter_expr=args.filter_expr, group_by=args.group_by)
+
+    elif args.command == "health":
+        from ctpipe.health import health_check
+        hc_result = health_check(config, args.tasks, args.models)
+        if args.output:
+            import json
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(hc_result, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Health check written to {out_path}")
+            result = 0 if hc_result["overall_status"] == "healthy" else 1
+        else:
+            result = hc_result
 
     elif args.command == "clean":
         from ctpipe.clean import clean
@@ -210,7 +272,7 @@ def main() -> int:
             runs=not args.no_runs,
             cache=args.cache,
             old_deliveries=args.old_deliveries,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run or args.clean_dry_run,
         )
         result = 0
 
@@ -225,6 +287,7 @@ def main() -> int:
         result = 0
 
     elif args.command == "reset":
+        from ctpipe.config import MODEL_SPECIFIC_STAGES
         from ctpipe.state import PipelineState
         state = PipelineState(config.state_path)
         models = args.models or ["qwen", "claude"]
@@ -243,6 +306,43 @@ def main() -> int:
         print(f"Reset {count} state entries.")
         result = 0
 
+    elif args.command == "pool":
+        from ctpipe.pool import pool_assign, pool_generate, pool_status
+        if args.action == "generate":
+            if not args.weights:
+                print("ERROR: --weights is required for 'pool generate'")
+                return 1
+            result = pool_generate(
+                base_dir,
+                weights_path=Path(args.weights),
+                per_project=args.per_project,
+                source=args.source,
+                github_token=config.github_token,
+                gitee_token=config.gitee_token,
+                http_proxy=config.http_proxy,
+                buffer=args.buffer,
+            )
+        elif args.action == "assign":
+            if not args.persons:
+                print("ERROR: --persons is required for 'pool assign'")
+                return 1
+            result = pool_assign(
+                base_dir,
+                persons=args.persons,
+                per_project=args.per_project,
+                weights_path=Path(args.weights) if args.weights else None,
+                tasks_per_person=args.tasks_per_person,
+            )
+        elif args.action == "status":
+            result = pool_status(base_dir, person_id=args.person)
+
+    if isinstance(result, dict):
+        import json
+        import sys
+        json_bytes = json.dumps(result, indent=2, ensure_ascii=False).encode("utf-8")
+        sys.stdout.buffer.write(json_bytes + b"\n")
+        sys.stdout.buffer.flush()
+        return 0
     if isinstance(result, bool):
         return 0 if result else 1
     if isinstance(result, int):
@@ -250,7 +350,89 @@ def main() -> int:
     return 0
 
 
-def _run_all_stages(config, args) -> bool:
+def _run_all_stages(config, args, *, dry_run: bool = False, as_json: bool = False) -> bool | dict:
+    from ctpipe.config import select_delivery_tasks
+
+    if dry_run:
+        from ctpipe.collect import collect_all
+        from ctpipe.finalize import finalize
+        from ctpipe.prepare import prepare
+        from ctpipe.run import run_all
+        from ctpipe.score import score_all
+        from ctpipe.validate import validate
+
+        if as_json:
+            tasks = select_delivery_tasks(config, args.tasks)
+            plan = {
+                "meta": {
+                    "delivery": config.delivery_dir.name,
+                    "config": args.config,
+                    "models": list(args.models),
+                    "task_count": len(tasks),
+                    "task_ids": [t.id for t in tasks],
+                },
+                "stages": [
+                    {"stage": "prepare", "number": 1,
+                     **prepare(config, args.tasks, dry_run=True, as_json=True)},
+                    {"stage": "run", "number": 2,
+                     **asyncio.run(run_all(config, args.tasks, args.models,
+                                           args.turn_timeout, args.total_timeout,
+                                           dry_run=True, as_json=True))},
+                    {"stage": "collect", "number": 3,
+                     **collect_all(config, args.tasks, args.models,
+                                   dry_run=True, as_json=True)},
+                    {"stage": "score", "number": 4,
+                     **asyncio.run(score_all(config, args.tasks, args.models,
+                                             auto_rescore=args.auto_rescore,
+                                             dry_run=True, as_json=True))},
+                    {"stage": "finalize", "number": 5,
+                     **finalize(config, args.tasks, args.models,
+                                dry_run=True, as_json=True)},
+                    {"stage": "validate", "number": 6,
+                     **validate(config, args.tasks, args.models,
+                                dry_run=True, as_json=True)},
+                ],
+            }
+            return plan
+
+        # Text mode
+        tasks = select_delivery_tasks(config, args.tasks)
+        task_ids_str = ", ".join(t.id for t in tasks[:5])
+        if len(tasks) > 5:
+            task_ids_str += f", ... ({len(tasks)} total)"
+
+        print("=" * 60)
+        print("  ctpipe all --dry-run: Execution Plan Preview")
+        print("=" * 60)
+        print(f"Tasks:    {task_ids_str}")
+        print(f"Models:   {', '.join(args.models)}")
+        print(f"Delivery: {config.delivery_dir.name}")
+
+        print(f"\n{'— Stage 1/6: PREPARE —':—^60}")
+        prepare(config, args.tasks, dry_run=True)
+
+        print(f"\n{'— Stage 2/6: RUN —':—^60}")
+        asyncio.run(run_all(config, args.tasks, args.models,
+                            args.turn_timeout, args.total_timeout, dry_run=True))
+
+        print(f"\n{'— Stage 3/6: COLLECT —':—^60}")
+        collect_all(config, args.tasks, args.models, dry_run=True)
+
+        print(f"\n{'— Stage 4/6: SCORE —':—^60}")
+        asyncio.run(score_all(config, args.tasks, args.models,
+                              auto_rescore=args.auto_rescore, dry_run=True))
+
+        print(f"\n{'— Stage 5/6: FINALIZE —':—^60}")
+        finalize(config, args.tasks, args.models, dry_run=True)
+
+        print(f"\n{'— Stage 6/6: VALIDATE —':—^60}")
+        validate(config, args.tasks, args.models, dry_run=True)
+
+        print("\n" + "=" * 60)
+        print("  [DRY RUN] No changes made. Re-run without --dry-run to execute.")
+        print("=" * 60)
+        return True
+
     from ctpipe.collect import collect_all
     from ctpipe.config import MODEL_SPECIFIC_STAGES, select_delivery_tasks
     from ctpipe.finalize import finalize

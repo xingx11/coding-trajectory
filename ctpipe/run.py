@@ -26,7 +26,6 @@ def _sanitize_run_dir(run_dir: Path) -> None:
     that could execute arbitrary commands when --dangerously-skip-permissions
     is used. Remove them, then rebuild the pipeline's own settings.
     """
-    import json as _json
 
     # Remove untrusted .claude/ directory
     claude_dir = run_dir / ".claude"
@@ -46,7 +45,7 @@ def _sanitize_run_dir(run_dir: Path) -> None:
     claude_dir.mkdir(parents=True, exist_ok=True)
     from ctpipe.prepare import SETTINGS_LOCAL
     (claude_dir / "settings.local.json").write_text(
-        _json.dumps(SETTINGS_LOCAL, indent=2), encoding="utf-8",
+        json.dumps(SETTINGS_LOCAL, indent=2), encoding="utf-8",
     )
 
 
@@ -320,7 +319,98 @@ async def run_all(
     models: list[str] | None = None,
     turn_timeout: int = 900,
     total_timeout: int = 3600,
-) -> None:
+    *,
+    dry_run: bool = False,
+    as_json: bool = False,
+) -> dict | None:
+    models = models or ["qwen", "claude"]
+
+    if dry_run:
+        state = PipelineState(config.state_path)
+        tasks = select_delivery_tasks(config, task_ids)
+        slots_data = []
+        will_run = 0
+        will_skip = 0
+
+        if not as_json:
+            print("=" * 60)
+            print("  DRY RUN: run")
+            print("=" * 60)
+
+        _REDACT_KEYS = {"ANTHROPIC_AUTH_TOKEN"}
+        for task in tasks:
+            for model_name in models:
+                already_done = state.is_done(task.id, "run", model_name)
+                if already_done:
+                    will_skip += 1
+                    slots_data.append({
+                        "task_id": task.id, "model": model_name, "skip": True,
+                    })
+                    if not as_json:
+                        print(f"\n[{task.id}/{model_name}]  SKIP (already done)")
+                    continue
+
+                will_run += 1
+                model_config = config.qwen if model_name == "qwen" else config.claude
+                prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
+                followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
+                run_dir = config.runs_root / f"{task.id}-{model_name}" / task.project_subdir
+
+                cmd = [
+                    "claude", "-p",
+                    "--output-format", "json",
+                    "--dangerously-skip-permissions",
+                    "--setting-sources", "local",
+                ]
+                if model_config.model:
+                    cmd += ["--model", model_config.model]
+
+                env = build_validated_env(model_config)
+                env_masked = {}
+                for k in sorted(env):
+                    env_masked[k] = "***REDACTED***" if k in _REDACT_KEYS else env[k]
+
+                slot = {
+                    "task_id": task.id, "model": model_name, "skip": False,
+                    "cmd": cmd, "cwd": str(run_dir),
+                    "model_id": model_config.model or None,
+                    "prompt_preview": prompt[:100], "prompt_chars": len(prompt),
+                    "followups": list(followups),
+                    "turns": 1 + len(followups),
+                    "timeout": {"turn": turn_timeout, "total": total_timeout},
+                    "env": env_masked,
+                }
+                slots_data.append(slot)
+
+                if not as_json:
+                    env_summary = [f"    {k} = {v}" for k, v in env_masked.items()]
+                    print(f"\n[{task.id}/{model_name}]  RUN")
+                    print(f"  cwd: {run_dir}")
+                    print(f"  cmd: {' '.join(cmd)}")
+                    print(f"  stdin: <<< prompt  (piped, {len(prompt)} chars)")
+                    print(f"  prompt (turn 1): {prompt[:100]}{'...' if len(prompt) > 100 else ''}")
+                    for i, fu in enumerate(followups, start=2):
+                        print(f"  followup (turn {i}): {fu[:100]}{'...' if len(fu) > 100 else ''}")
+                    print(f"  turns: 1 initial + {len(followups)} follow-up(s) = {1 + len(followups)} total")
+                    print(f"  timeout: turn={turn_timeout}s  total={total_timeout}s")
+                    print(f"  env:")
+                    print("\n".join(env_summary))
+
+        if as_json:
+            return {
+                "tasks": slots_data,
+                "summary": {
+                    "total_slots": len(tasks) * len(models),
+                    "to_run": will_run,
+                    "skipped": will_skip,
+                },
+            }
+
+        print(f"\nTotal: {len(tasks)} task(s) x {len(models)} model(s) = "
+              f"{len(tasks) * len(models)} slot(s): "
+              f"{will_run} to run, {will_skip} already done")
+        return
+
     state = PipelineState(config.state_path)
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]

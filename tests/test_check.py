@@ -24,84 +24,11 @@ from ctpipe.config import (
     BatchConfig,
     ModelConfig,
     TaskConfig,
+    model_stem,
     write_task_manifest,
 )
 from ctpipe.toml_utils import Criterion, write_quality_toml
-
-
-def _build_config(
-    tasks: list[TaskConfig] | None = None,
-    person_id: str = "56",
-    delivery_date: str = "20260608",
-) -> BatchConfig:
-    return BatchConfig(
-        delivery_date=delivery_date,
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-        person_id=person_id,
-    )
-
-
-def _make_task(task_id: str = "CT-0001", task_type: str = "bug-fix") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type=task_type,
-        domain="web_frontend",
-        language="ts",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-    )
-
-
-def _write_trajectory(
-    jsonl_path: Path, session_id: str, model_name: str, user_turns: int = 3
-) -> None:
-    """Write a minimal valid trajectory JSONL (>= 10 lines, valid session/model)."""
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps({"sessionId": session_id, "type": "system"})]
-    for i in range(user_turns):
-        lines.append(
-            json.dumps({"type": "user", "message": {"role": "user", "content": f"msg {i}"}})
-        )
-        lines.append(
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "model": f"{model_name}-model-v1",
-                        "content": f"reply {i}",
-                    },
-                }
-            )
-        )
-    while len(lines) < 12:
-        lines.append(json.dumps({"type": "system", "info": "padding"}))
-    jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _write_score(score_path: Path, score_per_criterion: int = 3) -> None:
-    """Write a complete score TOML with valid criterion names.
-
-    Uses first 7 of the 20 valid criterion names.
-    With points=5, 7 criteria: passrate = score_per_criterion / 5 (approx).
-    Default score_per_criterion=3 → passrate ≈ 0.6000.
-    """
-    score_path.parent.mkdir(parents=True, exist_ok=True)
-    names = REFERENCE_CRITERION_NAMES[:7]
-    criteria = [
-        Criterion(
-            name, REFERENCE_CRITERION_DESCRIPTIONS[name], "likert", 5,
-            1.0, score_per_criterion, "评分理由"
-        )
-        for name in names
-    ]
-    write_quality_toml(score_path, criteria)
+from conftest import build_config, make_task, write_trajectory, write_score
 
 
 def _write_score_custom(score_path: Path, criteria: list[Criterion]) -> None:
@@ -136,12 +63,12 @@ def _make_csv_row(
 ) -> dict[str, str]:
     return {
         "id": sub_id,
-        "qwen 本地trajectory": f"trajectories/qwen/{task_id}.jsonl",
+        "qwen 本地trajectory": f"trajectories/qwen/{model_stem(task_id, 'qwen')}.jsonl",
         "qwen session id": qwen_session,
-        "qwen rubrics 人工评分": f"scores/qwen/{task_id}.quality.toml",
-        "claude 本地trajectory": f"trajectories/claude/{task_id}.jsonl",
+        "qwen rubrics 人工评分": f"scores/qwen/{model_stem(task_id, 'qwen')}.quality.toml",
+        "claude 本地trajectory": f"trajectories/claude/{model_stem(task_id, 'claude')}.jsonl",
         "claude session id": claude_session,
-        "claude rubrics 人工评分": f"scores/claude/{task_id}.quality.toml",
+        "claude rubrics 人工评分": f"scores/claude/{model_stem(task_id, 'claude')}.quality.toml",
         "qwen passrate": qwen_passrate,
         "claude passrate": claude_passrate,
         "任务类型": "bug-fix",
@@ -170,10 +97,10 @@ def _setup_delivery(
             ("qwen", qwen_session, qwen_score),
             ("claude", claude_session, claude_score),
         ]:
-            traj_path = delivery_dir / "trajectories" / model_name / f"{task.id}.jsonl"
-            _write_trajectory(traj_path, session, model_name)
-            score_path = delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
-            _write_score(score_path, score)
+            traj_path = delivery_dir / "trajectories" / model_name / f"{model_stem(task.id, model_name)}.jsonl"
+            write_trajectory(traj_path, session, model_name)
+            score_path = delivery_dir / "scores" / model_name / f"{model_stem(task.id, model_name)}.quality.toml"
+            write_score(score_path, score)
 
         meta_dir = delivery_dir / "metadata"
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -192,13 +119,13 @@ class CheckCSVCrossValidationTest(unittest.TestCase):
 
     def test_session_id_mismatch_detected_with_formatted_ids(self) -> None:
         """CSV has formatted ID '56-608-bug-fix-01' with wrong session → must detect."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task], person_id="56", delivery_date="20260608")
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [
                     _make_csv_row(sub_id, task.id, qwen_session="WRONG-SESSION")
@@ -211,13 +138,13 @@ class CheckCSVCrossValidationTest(unittest.TestCase):
 
     def test_passrate_mismatch_detected_with_formatted_ids(self) -> None:
         """CSV has formatted ID with wrong passrate → must detect."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task], person_id="56", delivery_date="20260608")
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [
                     _make_csv_row(sub_id, task.id, qwen_passrate="0.9999")
@@ -230,13 +157,13 @@ class CheckCSVCrossValidationTest(unittest.TestCase):
 
     def test_empty_person_id_still_cross_validates(self) -> None:
         """person_id='' → submission ID is '-608-bug-fix-01'; cross-validation must still fire."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task], person_id="", delivery_date="20260608")
+                config = build_config([task], person_id="", delivery_date="20260608")
                 sub_id = "-608-bug-fix-01"
                 csv_rows = [
                     _make_csv_row(sub_id, task.id, qwen_session="WRONG-SESSION")
@@ -249,13 +176,13 @@ class CheckCSVCrossValidationTest(unittest.TestCase):
 
     def test_no_issues_when_csv_matches_trajectory_and_score(self) -> None:
         """Sanity: no cross-validation issues when CSV data matches reality."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task], person_id="56", delivery_date="20260608")
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
@@ -266,14 +193,14 @@ class CheckCSVCrossValidationTest(unittest.TestCase):
 
     def test_multiple_tasks_with_different_types(self) -> None:
         """Two tasks of different types get sequential IDs; both cross-validated."""
-        task1 = _make_task("CT-0001", task_type="bug-fix")
-        task2 = _make_task("CT-0002", task_type="feature")
+        task1 = make_task("CT-0001", task_type="bug-fix")
+        task2 = make_task("CT-0002", task_type="feature")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config(
+                config = build_config(
                     [task1, task2], person_id="56", delivery_date="20260608"
                 )
                 csv_rows = [
@@ -302,7 +229,7 @@ class CountTurnsTest(unittest.TestCase):
         """Valid trajectory with 3 user turns."""
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl_path = Path(tmpdir) / "test.jsonl"
-            _write_trajectory(jsonl_path, "session-123", "qwen", user_turns=3)
+            write_trajectory(jsonl_path, "session-123", "qwen", user_turns=3)
             user_turns, models, session_id, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 3)
@@ -500,13 +427,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_unscored_template(self) -> None:
         """All criteria with score=0 and empty rationale → unscored template."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
@@ -520,7 +447,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -530,14 +457,14 @@ class ScoreValidationTest(unittest.TestCase):
         self.assertIn("CT-0001/qwen", output)
 
     def test_too_few_criteria(self) -> None:
-        """5 criteria (below MIN_CRITERIA_COUNT=6) → wrong criteria count."""
-        task = _make_task("CT-0001")
+        """5 criteria (below MIN_CRITERIA_COUNT=7) → wrong criteria count."""
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
@@ -550,7 +477,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -560,13 +487,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_too_many_criteria(self) -> None:
         """11 criteria (above MAX_CRITERIA_COUNT=10) → wrong criteria count."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
@@ -579,7 +506,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -589,13 +516,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_score_out_of_range_high(self) -> None:
         """One criterion with score=6 (above max 5) → out of range."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 # passrate = (6+3*6)/(5*7) = 24/35 ≈ 0.6857
                 csv_rows = [_make_csv_row(sub_id, task.id, qwen_passrate="0.6857")]
@@ -614,7 +541,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names[1:]
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -624,13 +551,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_score_out_of_range_low(self) -> None:
         """One criterion with score=0 but has rationale → out of range (not unscored)."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 # passrate = (0+3*6)/(5*7) = 18/35 ≈ 0.5143
                 csv_rows = [_make_csv_row(sub_id, task.id, qwen_passrate="0.5143")]
@@ -649,7 +576,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names[1:]
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -661,13 +588,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_missing_rationale(self) -> None:
         """One criterion with score but no rationale → missing rationale + incomplete."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
@@ -685,7 +612,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for name in names[1:]
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -696,13 +623,13 @@ class ScoreValidationTest(unittest.TestCase):
 
     def test_invalid_criterion_name(self) -> None:
         """All criteria with names that are not valid snake_case → invalid name."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 # passrate = (3*7)/(5*7) = 0.6000
                 csv_rows = [_make_csv_row(sub_id, task.id, qwen_passrate="0.6000")]
@@ -715,7 +642,7 @@ class ScoreValidationTest(unittest.TestCase):
                     )
                     for i in range(7)
                 ]
-                score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(score_path, criteria)
 
                 result, output = _run_check(config)
@@ -734,13 +661,13 @@ class CrossModelCriterionConsistencyTest(unittest.TestCase):
 
     def test_criterion_mismatch_warning(self) -> None:
         """Qwen and claude use different valid criteria → warning issued."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 # Qwen: score=3 → passrate=0.6000, Claude: score=5 → passrate=1.0000
                 csv_rows = [_make_csv_row(
@@ -759,7 +686,7 @@ class CrossModelCriterionConsistencyTest(unittest.TestCase):
                     )
                     for name in names_qwen
                 ]
-                qwen_score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                qwen_score_path = config.delivery_dir / "scores" / "qwen" / f"{model_stem(task.id, 'qwen')}.quality.toml"
                 _write_score_custom(qwen_score_path, criteria_qwen)
 
                 # Claude uses REFERENCE_CRITERION_NAMES[1:8] (shifted by one) with score=5
@@ -771,15 +698,15 @@ class CrossModelCriterionConsistencyTest(unittest.TestCase):
                     )
                     for name in names_claude
                 ]
-                claude_score_path = config.delivery_dir / "scores" / "claude" / f"{task.id}.quality.toml"
+                claude_score_path = config.delivery_dir / "scores" / "claude" / f"{model_stem(task.id, 'claude')}.quality.toml"
                 _write_score_custom(claude_score_path, criteria_claude)
 
                 result, output = _run_check(config)
 
-        # Should pass (warnings don't fail check)
-        self.assertTrue(result, f"check should pass with warnings only, but got:\n{output}")
-        # But should have the criterion mismatch warning
-        self.assertIn("criterion mismatch between qwen/claude", output)
+        # Should fail (criterion mismatch is now an error, not a warning)
+        self.assertFalse(result, f"check should fail on criterion mismatch, but it passed:\n{output}")
+        # Should mention the criterion name mismatch
+        self.assertIn("criterion name mismatch between qwen/claude", output)
         # Should mention criteria only in qwen and only in claude
         only_in_qwen = set(names_qwen) - set(names_claude)
         only_in_claude = set(names_claude) - set(names_qwen)
@@ -790,16 +717,16 @@ class CrossModelCriterionConsistencyTest(unittest.TestCase):
 
     def test_criterion_match_no_warning(self) -> None:
         """Qwen and claude use identical criteria → no warning."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
-                # Both use default _write_score which uses REFERENCE_CRITERION_NAMES[:7]
+                # Both use default write_score which uses REFERENCE_CRITERION_NAMES[:7]
                 _setup_delivery(config, [task], csv_rows)
                 result, output = _run_check(config)
 
@@ -809,19 +736,19 @@ class CrossModelCriterionConsistencyTest(unittest.TestCase):
 
     def test_no_warning_when_one_side_score_missing(self) -> None:
         """When one model's score file is missing, no criterion mismatch warning."""
-        task = _make_task("CT-0001")
+        task = make_task("CT-0001")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="56", delivery_date="20260608")
                 sub_id = "56-608-bug-fix-01"
                 csv_rows = [_make_csv_row(sub_id, task.id)]
                 _setup_delivery(config, [task], csv_rows)
 
                 # Delete claude score file so qwen_criteria is set but claude_criteria is empty
-                claude_score_path = config.delivery_dir / "scores" / "claude" / f"{task.id}.quality.toml"
+                claude_score_path = config.delivery_dir / "scores" / "claude" / f"{model_stem(task.id, 'claude')}.quality.toml"
                 claude_score_path.unlink()
 
                 result, output = _run_check(config)

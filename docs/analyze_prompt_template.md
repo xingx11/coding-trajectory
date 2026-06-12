@@ -19,9 +19,12 @@ prompt_qwen、prompt_claude、followups_qwen、followups_claude 必须满足：
 2. 像真人开发者在 AI 编码助手中打字一样 — 简短、口语化、自然
 3. 初始 prompt（prompt_qwen / prompt_claude）只写一句话描述目标，如："帮我给这个项目加一个命令行状态查看功能"、"这个项目有个并发 bug，帮我修一下"
 4. followups 是渐进式追问 — 每条只问一个具体的下一步，像自然对话："现在加上颜色显示"、"再写几个测试"、"处理一下边界情况"。每条 1-2 句话
-5. prompt_qwen 和 prompt_claude 描述同一个任务但措辞略有不同。followups_qwen: 2-3 条。followups_claude: 4-5 条
+5. prompt_qwen 和 prompt_claude 描述同一个任务但措辞略有不同。followups_qwen 和 followups_claude 数量必须相同（3-4 条）
 6. 不要以"你正在一个本地项目目录中工作"等模板化前缀开头，直接说需求
 7. 渐进流程：初始 prompt = 大目标 → followup 1 = 核心实现 → followup 2 = 增强/边界 → followup 3+ = 测试、完善、文档
+8. prompt_qwen 和 prompt_claude 必须传达相同的信息量和难度。不要给某个模型额外的提示、文件路径或技术细节。两个模型应凭自身能力成功或失败，而非信息不对称
+9. 两个模型的 followups 必须按相同顺序覆盖相同功能领域。措辞可以不同但实质要求必须等价
+10. 不要在 prompt 中引用项目中实际不存在的文件、函数或技术细节
 
 ## 输出要求
 
@@ -86,6 +89,8 @@ followups_claude = [
 1. 基于任务的具体特征选择（bug-fix 应考虑 `tool_usage_and_failure_recovery`、`testing_and_verification_rigor`；feature 应考虑 `context_exploration_and_code_navigation`、`maintainability_and_change_minimality` 等）
 2. 如果某个维度对本任务没有可观察证据，不要选择它
 3. `architecture_boundaries_and_security_compliance`（weight=2.0）通常应选择
+4. 每个维度必须保持原子性：一个维度只评一件事，不能同时要求 A 和 B
+5. 所选维度之间不能有实质性重叠。如果两个维度评价同一类能力，只保留更精确的一个
 
 **description 定制化（极其重要）**：
 
@@ -95,6 +100,7 @@ followups_claude = [
 2. **融入项目特征**：把项目名称、技术栈、具体问题融入各档位描述中
 3. 不能使用通用模板，必须让人一看就知道这是针对什么项目什么任务的评分标准
 4. 使用中文，写成一行 TOML 字符串
+5. 每个 description 的各档位定义中，每档只描述一个判断条件。禁止在某一档中用"并且/且/同时"连接多个独立条件
 
 定制化示例（以 turbulenz_engine 键盘事件修复任务为例）：
 

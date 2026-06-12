@@ -120,12 +120,38 @@ class BatchConfig:
     def score_path(self, task_id: str, model: str) -> Path:
         validate_path_component(task_id, "task_id")
         validate_path_component(model, "model")
-        return self.delivery_dir / "scores" / model / f"{task_id}.quality.toml"
+        return self.delivery_dir / "scores" / model / f"{model_stem(task_id, model)}.quality.toml"
 
     def trajectory_path(self, task_id: str, model: str) -> Path:
         validate_path_component(task_id, "task_id")
         validate_path_component(model, "model")
-        return self.delivery_dir / "trajectories" / model / f"{task_id}.jsonl"
+        return self.delivery_dir / "trajectories" / model / f"{model_stem(task_id, model)}.jsonl"
+
+    def resolve_score_path(self, task_id: str, model: str) -> Path:
+        """读取用：优先新命名 {model}-{编号}.quality.toml，回退旧命名 {task_id}.quality.toml。"""
+        new_path = self.score_path(task_id, model)
+        if new_path.exists():
+            return new_path
+        legacy = self.delivery_dir / "scores" / model / f"{task_id}.quality.toml"
+        return legacy if legacy.exists() else new_path
+
+    def resolve_trajectory_path(self, task_id: str, model: str) -> Path:
+        """读取用：优先新命名 {model}-{编号}.jsonl，回退旧命名 {task_id}.jsonl。"""
+        new_path = self.trajectory_path(task_id, model)
+        if new_path.exists():
+            return new_path
+        legacy = self.delivery_dir / "trajectories" / model / f"{task_id}.jsonl"
+        return legacy if legacy.exists() else new_path
+
+
+def model_stem(task_id: str, model: str) -> str:
+    """由任务编号与模型名派生文件名主干：CT-0038 + qwen -> 'qwen-0038'。
+
+    编号取 'CT-' 之后的部分，前缀模型名。任务编号本身保持 CT-XXXX 不变。
+    若编号不含 '-'（如测试用的裸 id），则整体作为后缀。
+    """
+    suffix = task_id.split("-", 1)[1] if "-" in task_id else task_id
+    return f"{model}-{suffix}"
 
 
 def _find_git_bash() -> str:
@@ -185,7 +211,7 @@ THRESHOLD_RELATIVE_GAIN_MIN = 0.25
 # Scoring dimension definitions (from docs/评分规范.md §7)
 # ---------------------------------------------------------------------------
 
-MIN_CRITERIA_COUNT = 6
+MIN_CRITERIA_COUNT = 7
 MAX_CRITERIA_COUNT = 10
 
 # Shared pipeline constants
@@ -263,6 +289,11 @@ def is_valid_criterion_name(name: str) -> bool:
 
 _TASK_ID_RE = re.compile(r'^CT-\d{4}$')
 _DELIVERY_DATE_RE = re.compile(r'^\d{8}$')
+_WINDOWS_RESERVED = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
 
 
 def validate_task_id(task_id: str) -> str:
@@ -297,11 +328,6 @@ def validate_path_component(value: str, label: str) -> str:
         raise ValueError(f"Invalid {label}: {value!r} contains path traversal characters")
     # Block Windows reserved device names
     stem = value.split('.')[0].upper()
-    _WINDOWS_RESERVED = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-    }
     if stem in _WINDOWS_RESERVED:
         raise ValueError(f"Invalid {label}: {value!r} is a Windows reserved name")
     return value
@@ -344,7 +370,7 @@ def build_reference_dimension_table(names: list[str] | None = None) -> str:
     lines: list[str] = []
     for name in target:
         desc = REFERENCE_CRITERION_DESCRIPTIONS.get(name, "")
-        lines.append(f"- `{name}` (weight=1.0): {desc}")
+        lines.append(f"- `{name}`: {desc}")
     return "\n".join(lines)
 
 def build_bad_pattern_table() -> str:

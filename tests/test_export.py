@@ -20,37 +20,13 @@ from ctpipe.config import (
     BatchConfig,
     ModelConfig,
     TaskConfig,
+    model_stem,
     write_task_manifest,
 )
 from ctpipe.export import export_report
 from ctpipe.state import PipelineState
 from ctpipe.toml_utils import Criterion, write_quality_toml
-
-
-def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
-    return BatchConfig(
-        delivery_date="20990101",
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-        person_id="42",
-    )
-
-
-def _make_task(task_id: str = "CT-0001", task_type: str = "feature") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type=task_type,
-        domain="web_backend",
-        language="python",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-        bad_pattern="lazy_shortcut",
-    )
+from conftest import build_config, make_task
 
 
 def _setup_full_data(
@@ -67,7 +43,7 @@ def _setup_full_data(
     # Trajectory
     traj_dir = delivery_dir / "trajectories" / model_name
     traj_dir.mkdir(parents=True, exist_ok=True)
-    traj_file = traj_dir / f"{task_id}.jsonl"
+    traj_file = traj_dir / f"{model_stem(task_id, model_name)}.jsonl"
     lines = [json.dumps({"sessionId": session_id, "type": "user"}) + "\n"]
     lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": f"{model_name}-test"}}) + "\n")
     lines.append(json.dumps({"type": "user"}) + "\n")
@@ -84,7 +60,7 @@ def _setup_full_data(
         )
         for name in names
     ]
-    write_quality_toml(score_dir / f"{task_id}.quality.toml", criteria)
+    write_quality_toml(score_dir / f"{model_stem(task_id, model_name)}.quality.toml", criteria)
 
     # State
     state.set(
@@ -94,7 +70,7 @@ def _setup_full_data(
     state.set(
         task_id, "collect", model=model_name,
         status="done", session_id=session_id,
-        jsonl_path=f"trajectories/{model_name}/{task_id}.jsonl",
+        jsonl_path=f"trajectories/{model_name}/{model_stem(task_id, model_name)}.jsonl",
     )
 
 
@@ -106,12 +82,12 @@ def _setup_full_data(
 class ExportNormalTest(unittest.TestCase):
 
     def test_full_report_structure(self) -> None:
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut") for i in range(1, 4)]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config(tasks)
+                config = build_config(tasks, person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, tasks)
@@ -199,11 +175,11 @@ class ExportNormalTest(unittest.TestCase):
 
     def test_threshold_check_passed_when_claude_beats_qwen(self) -> None:
         """qwen passrate=0.4, claude passrate=0.8, gain=100% → all thresholds met."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -221,11 +197,11 @@ class ExportNormalTest(unittest.TestCase):
 
     def test_threshold_check_failed_when_qwen_too_high(self) -> None:
         """qwen score=4 → 0.8 >= 0.7 threshold → issues."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -252,11 +228,11 @@ class ExportPartialMissingTest(unittest.TestCase):
 
     def test_missing_score_file_sets_scoring_null(self) -> None:
         """When a score file does not exist, scoring for that model is null."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -267,7 +243,7 @@ class ExportPartialMissingTest(unittest.TestCase):
                 # Claude: only trajectory, no score file
                 traj_dir = delivery_dir / "trajectories" / "claude"
                 traj_dir.mkdir(parents=True, exist_ok=True)
-                (traj_dir / f"{task.id}.jsonl").write_text(
+                (traj_dir / f"{model_stem(task.id, 'claude')}.jsonl").write_text(
                     json.dumps({"sessionId": "cl-sess"}) + "\n", encoding="utf-8",
                 )
                 state.set(task.id, "run", model="claude", status="done", session_id="cl-sess", turns=2)
@@ -281,11 +257,11 @@ class ExportPartialMissingTest(unittest.TestCase):
 
     def test_missing_trajectory_sets_trajectory_info_null(self) -> None:
         """When no trajectory file and no state data exists, trajectory_info is null."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -304,11 +280,11 @@ class ExportPartialMissingTest(unittest.TestCase):
 
     def test_partial_trajectory_with_missing_fields(self) -> None:
         """State has session_id but no turns/duration → only session_id filled."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -329,11 +305,11 @@ class ExportPartialMissingTest(unittest.TestCase):
 
     def test_report_does_not_raise_on_completely_empty_delivery(self) -> None:
         """Empty delivery dir (no trajectories, no scores, no state) should not raise."""
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -361,7 +337,7 @@ class ExportEmptyTaskListTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([])
+                config = build_config([], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -376,7 +352,7 @@ class ExportEmptyTaskListTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([])
+                config = build_config([], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -394,11 +370,11 @@ class ExportEmptyTaskListTest(unittest.TestCase):
 class ExportOutputFileTest(unittest.TestCase):
 
     def test_output_writes_json_to_file(self) -> None:
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -420,7 +396,7 @@ class ExportOutputFileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([])
+                config = build_config([], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -438,11 +414,11 @@ class ExportOutputFileTest(unittest.TestCase):
 class ExportFilteringTest(unittest.TestCase):
 
     def test_task_ids_filter(self) -> None:
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut") for i in range(1, 4)]
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config(tasks)
+                config = build_config(tasks, person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, tasks)
@@ -457,11 +433,11 @@ class ExportFilteringTest(unittest.TestCase):
         self.assertEqual(report["tasks"][0]["metadata"]["id"], "CT-0002")
 
     def test_single_model_filter(self) -> None:
-        task = _make_task()
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -489,14 +465,14 @@ class ExportSummaryStatsTest(unittest.TestCase):
 
     def test_summary_passrate_min_max_mean(self) -> None:
         """Three tasks with different scores → correct min/max/mean."""
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut") for i in range(1, 4)]
         # score=2→0.4, score=3→0.6, score=4→0.8
         scores = [2, 3, 4]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config(tasks)
+                config = build_config(tasks, person_id="42")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, tasks)
@@ -515,6 +491,129 @@ class ExportSummaryStatsTest(unittest.TestCase):
             self.assertAlmostEqual(pm["max"], 0.8, places=3)
             self.assertAlmostEqual(pm["mean"], 0.6, places=3)
             self.assertEqual(pm["count"], 3)
+
+
+# =========================================================================
+# Test 7: passrate=0.0 is a valid data point (regression for the bug where
+#         a true zero passrate was dropped by `> 0` / falsy checks)
+# =========================================================================
+
+
+class ExportZeroPassrateTest(unittest.TestCase):
+
+    def test_threshold_check_counts_zero_passrate_as_data(self) -> None:
+        """qwen=0.0 and claude=0.0 must be treated as real data, not 'no data'.
+
+        A 0.0 passrate means every criterion scored zero (the rubric was
+        graded, nobody passed) — it is data. _build_threshold_check must set
+        has_qwen/has_claude True so the cross-model rules fire. The buggy
+        `> 0` version made has_qwen False for 0.0, which silently skipped
+        every rule that needs both models, producing issues=None instead.
+
+        We assert at least one issue mentions "qwen": those issues (claude
+        <= qwen, and the qwen==0 branch) only exist when has_qwen is True,
+        so their presence proves the 0.0 was counted as data.
+        """
+        task = make_task(task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_base = Path(tmpdir)
+            with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
+                config = build_config([task], person_id="42")
+                delivery_dir = config.delivery_dir
+                delivery_dir.mkdir(parents=True, exist_ok=True)
+                write_task_manifest(config.task_manifest_path, [task])
+
+                state = PipelineState(delivery_dir / "pipeline_state.json")
+                _setup_full_data(delivery_dir, state, task.id, "qwen", score=0)
+                _setup_full_data(delivery_dir, state, task.id, "claude", score=0)
+                state.save()
+
+                report = export_report(config)
+
+        entry = report["tasks"][0]
+        # Both models scored 0.0 — confirm export computed a real 0.0, not None.
+        self.assertEqual(entry["scoring"]["qwen"]["passrate"], 0.0)
+        self.assertEqual(entry["scoring"]["claude"]["passrate"], 0.0)
+
+        tc = entry["threshold_check"]
+        # 0.0 is data → both present → cross-model rules fire → not passed.
+        self.assertFalse(tc["passed"])
+        self.assertIsNotNone(tc["issues"])
+        self.assertTrue(len(tc["issues"]) > 0)
+        # Issues that name "qwen" only exist when has_qwen is True (i.e. the
+        # 0.0 was counted). The old `> 0` bug would have produced none.
+        self.assertTrue(
+            any("qwen" in issue for issue in tc["issues"]),
+            f"expected a qwen-related issue proving 0.0 counts as data, got: {tc['issues']}",
+        )
+
+    def test_summary_includes_zero_passrate_task(self) -> None:
+        """A task with passrate=0.0 must be counted in per_model aggregates.
+
+        Scores [0, 2, 4] → passrates [0.0, 0.4, 0.8]. If 0.0 is counted:
+        count=3, min=0.0, mean=0.4. The buggy `> 0` collection would drop
+        the 0.0 row → count=2, min=0.4, mean=0.6.
+        """
+        tasks = [make_task(f"CT-{i:04d}", task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut") for i in range(1, 4)]
+        scores = [0, 2, 4]  # → 0.0, 0.4, 0.8
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_base = Path(tmpdir)
+            with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
+                config = build_config(tasks, person_id="42")
+                delivery_dir = config.delivery_dir
+                delivery_dir.mkdir(parents=True, exist_ok=True)
+                write_task_manifest(config.task_manifest_path, tasks)
+
+                state = PipelineState(delivery_dir / "pipeline_state.json")
+                for task, score in zip(tasks, scores):
+                    _setup_full_data(delivery_dir, state, task.id, "qwen", score=score)
+                    _setup_full_data(delivery_dir, state, task.id, "claude", score=score)
+                state.save()
+
+                report = export_report(config)
+
+        for model_name in ("qwen", "claude"):
+            pm = report["summary"]["per_model_passrate"][model_name]
+            self.assertIsNotNone(pm)
+            self.assertEqual(pm["count"], 3)  # 0.0 row is included, not dropped
+            self.assertAlmostEqual(pm["min"], 0.0, places=3)
+            self.assertAlmostEqual(pm["max"], 0.8, places=3)
+            self.assertAlmostEqual(pm["mean"], 0.4, places=3)
+
+    def test_summary_all_zero_passrate_is_not_null(self) -> None:
+        """When every task has passrate=0.0, per_model stats must still exist.
+
+        Two tasks, all scores 0 → passrates all 0.0. With 0.0 counted, the
+        per_model block is present with count=2 and min/max/mean=0.0. The
+        buggy `> 0` collection would leave `values` empty → per_model=None,
+        which is exactly the failure this guards against.
+        """
+        tasks = [make_task(f"CT-{i:04d}", task_type="feature", domain="web_backend", language="python", bad_pattern="lazy_shortcut") for i in range(1, 3)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_base = Path(tmpdir)
+            with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
+                config = build_config(tasks, person_id="42")
+                delivery_dir = config.delivery_dir
+                delivery_dir.mkdir(parents=True, exist_ok=True)
+                write_task_manifest(config.task_manifest_path, tasks)
+
+                state = PipelineState(delivery_dir / "pipeline_state.json")
+                for task in tasks:
+                    _setup_full_data(delivery_dir, state, task.id, "qwen", score=0)
+                    _setup_full_data(delivery_dir, state, task.id, "claude", score=0)
+                state.save()
+
+                report = export_report(config)
+
+        for model_name in ("qwen", "claude"):
+            pm = report["summary"]["per_model_passrate"][model_name]
+            self.assertIsNotNone(pm)  # NOT None, even though every value is 0.0
+            self.assertEqual(pm["count"], 2)
+            self.assertAlmostEqual(pm["min"], 0.0, places=3)
+            self.assertAlmostEqual(pm["max"], 0.0, places=3)
+            self.assertAlmostEqual(pm["mean"], 0.0, places=3)
 
 
 if __name__ == "__main__":

@@ -45,14 +45,6 @@ class _Entry:
             return f"{self.task_id}/{self.stage}/{self.model}"
         return f"{self.task_id}/{self.stage}"
 
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, _Entry):
-            return NotImplemented
-        return (self.task_id, self.stage, self.model) == (other.task_id, other.stage, other.model)
-
-    def __hash__(self) -> int:
-        return hash((self.task_id, self.stage, self.model))
-
 
 def _get_status(state: PipelineState, entry: _Entry) -> str:
     """Read the status string for a given entry."""

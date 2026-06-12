@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ctpipe.config import model_stem
 from ctpipe.project_hash import project_hash_dir
 
 
@@ -29,12 +30,12 @@ class TrajectoryInfo:
         return "unknown"
 
 
-def trajectory_filename(task_id: str) -> str:
-    return f"{task_id}.jsonl"
+def trajectory_filename(task_id: str, model: str) -> str:
+    return f"{model_stem(task_id, model)}.jsonl"
 
 
 def expected_delivery_path(delivery_dir: Path, model_name: str, task_id: str) -> Path:
-    return delivery_dir / "trajectories" / model_name / trajectory_filename(task_id)
+    return delivery_dir / "trajectories" / model_name / trajectory_filename(task_id, model_name)
 
 
 def find_delivery_trajectory(
@@ -47,6 +48,10 @@ def find_delivery_trajectory(
     if expected.exists():
         return expected
 
+    legacy = delivery_dir / "trajectories" / model_name / f"{task_id}.jsonl"
+    if legacy.exists():
+        return legacy
+
     traj_dir = delivery_dir / "trajectories" / model_name
     if not traj_dir.is_dir():
         return None
@@ -56,8 +61,9 @@ def find_delivery_trajectory(
         if by_session.exists():
             return by_session
 
+    canonical_stem = model_stem(task_id, model_name)
     for candidate in sorted(traj_dir.glob("*.jsonl")):
-        if candidate.stem == task_id:
+        if candidate.stem == canonical_stem or candidate.stem == task_id:
             return candidate
     return None
 

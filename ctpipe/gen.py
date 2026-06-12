@@ -10,6 +10,8 @@ import tomllib
 from contextlib import nullcontext
 from pathlib import Path
 
+import threading
+
 from ctpipe import strip_claude_wrapper
 from ctpipe.config import (
     REFERENCE_CRITERION_DESCRIPTIONS,
@@ -20,9 +22,9 @@ from ctpipe.config import (
 )
 from ctpipe.distribution import DISTRIBUTION, TaskSlot, expand_slot_for_batch, sample_slots
 
-from ctpipe.github_search import search_and_clone, search_and_clone_gitee
+from ctpipe.github_search import search_and_clone, search_and_clone_gitee, clone_project, GitHubRepo
 from ctpipe.rescore import parse_dimension_output
-from ctpipe.toml_utils import Criterion, escape_toml_multiline, write_quality_toml
+from ctpipe.toml_utils import Criterion, escape_toml_basic, escape_toml_multiline, write_quality_toml
 from ctpipe.project_scan import scan_project
 
 # Default timeouts for gen stages (seconds)
@@ -30,7 +32,7 @@ _GEN_TOTAL_TIMEOUT = 900
 _GEN_STEP_TIMEOUT = 180
 
 # Process-internal lock fallback when filelock is not installed
-_repo_lock = __import__("threading").Lock()
+_repo_lock = threading.Lock()
 
 IDEA_PROMPT = """You are a coding-task designer. Propose ONE realistic coding task for this project.
 Requirements: realistic, requires cross-file understanding, clear acceptance criteria.
@@ -53,9 +55,12 @@ CRITICAL — Language & style rules for prompt_qwen, prompt_claude, followups_qw
 2. Write them as a real human developer would type into an AI coding assistant — short, casual, natural.
 3. The initial prompt (prompt_qwen / prompt_claude) should be ONE short sentence describing the overall goal, like a developer's first message. Examples: "帮我给这个项目加一个命令行状态查看功能", "这个项目有个并发 bug，帮我修一下". Do NOT include long requirement lists in the initial prompt.
 4. followups are progressive refinements — each one asks for ONE specific next step, building on what the previous prompt/followup asked for. They should read like a natural conversation: "现在加上颜色显示", "再写几个测试", "处理一下边界情况". Keep each followup to 1-2 short sentences max.
-5. prompt_qwen and prompt_claude describe the same task but may be phrased slightly differently. followups_qwen: 2-3 items. followups_claude: 4-5 items.
+5. prompt_qwen and prompt_claude describe the same task but may be phrased slightly differently. followups_qwen and followups_claude must have the SAME number of items (3-4 items each).
 6. Do NOT start prompts with boilerplate like "你正在一个本地项目目录中工作" or any formulaic prefix. Just state the request directly.
 7. The progressive flow should be: initial prompt = broad goal → followup 1 = core implementation detail → followup 2 = enhancement or edge case → followup 3+ = testing, polish, docs.
+8. prompt_qwen and prompt_claude must convey the same information and same difficulty level. Do NOT give one model extra hints, file paths, or technical details that the other does not receive. Both prompts should allow the model to succeed or fail based on its own capability, not based on information asymmetry.
+9. followups for both models must cover the same functional areas in the same order. The phrasing may differ but the substantive requirements must be equivalent. Do NOT give one model easier or more specific sub-tasks.
+10. Do NOT reference files, functions, or technical details in prompts that do not actually exist in the project. If a prompt mentions a specific file path or class name, it must be verifiable in the codebase.
 
 Return ONLY valid JSON (no markdown):
 {"prompt_qwen":"...","prompt_claude":"...","followups_qwen":["..."],"followups_claude":["..."]}"""
@@ -351,6 +356,8 @@ async def _gen_customize_criteria(
 4. 优先选择与核心目标、验收标准和最终可用性最相关的维度
 5. 与架构边界、安全合规相关的维度设 weight = 2.0，其余设 1.0
 6. 维度 name 必须是定制化的英文 snake_case 标识名（如 `cirq_export_data_flow_comprehension`），体现项目名/技术栈/具体操作，不要使用通用维度名
+7. 每个维度必须保持原子性：一个维度只评一件事，不能同时要求 A 和 B。错误示例："该维度评价模型是否意识到 hooks.js 是 hooks.ts 的编译产物，并在修改源码后同步修改编译产物"——这混合了两个独立能力，必须拆分
+8. 所选维度之间不能有实质性重叠。如果两个维度评价的是同一类能力的不同说法，只保留更精确的一个
 
 ## description 定制规则（极其重要）
 
@@ -360,6 +367,7 @@ async def _gen_customize_criteria(
 2. **融入项目特征**：把项目名称（{project_name}）、技术栈（{language}）、具体任务（{task_title}）融入到各档位的描述中
 3. 不能是通用模板，必须让人一看就知道这是针对什么项目什么任务的评分标准
 4. 使用中文，写成一行字符串
+5. 每个 description 的各档位定义中，每档只描述一个判断条件。禁止在某一档中用"并且/且/同时"连接多个独立条件
 
 ### 定制化示例
 
@@ -401,18 +409,6 @@ rationale = ""
     return None
 
 
-def _escape_toml_basic_string(value: str) -> str:
-    """Escape a value for use inside TOML double-quoted basic strings."""
-    return (
-        value
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-
-
 def _format_toml_entry(
     task_id: str,
     project_path: str,
@@ -432,21 +428,21 @@ def _format_toml_entry(
     def fmt_followups(items: list[str]) -> str:
         lines = []
         for item in items:
-            lines.append(f'  "{_escape_toml_basic_string(item)}",')
+            lines.append(f'  "{escape_toml_basic(item)}",')
         return "[\n" + "\n".join(lines) + "\n]"
 
     parts = [
         f'\n[[task]]\n'
-        f'id = "{_escape_toml_basic_string(task_id)}"\n'
-        f'project_path = "{_escape_toml_basic_string(project_path)}"\n'
-        f'clone_method = "{_escape_toml_basic_string(clone_method)}"\n'
-        f'task_type = "{_escape_toml_basic_string(task_type)}"\n'
-        f'domain = "{_escape_toml_basic_string(domain)}"\n'
-        f'language = "{_escape_toml_basic_string(language)}"\n'
+        f'id = "{escape_toml_basic(task_id)}"\n'
+        f'project_path = "{escape_toml_basic(project_path)}"\n'
+        f'clone_method = "{escape_toml_basic(clone_method)}"\n'
+        f'task_type = "{escape_toml_basic(task_type)}"\n'
+        f'domain = "{escape_toml_basic(domain)}"\n'
+        f'language = "{escape_toml_basic(language)}"\n'
     ]
 
     if task_title:
-        parts.append(f'task_title = "{_escape_toml_basic_string(task_title)}"\n')
+        parts.append(f'task_title = "{escape_toml_basic(task_title)}"\n')
     if task_description:
         parts.append(f'task_description = """{escape_toml_multiline(task_description)}"""\n')
     if acceptance_criteria:
@@ -462,15 +458,29 @@ def _format_toml_entry(
     return "".join(parts)
 
 
-def _load_used_repos(state_path: Path) -> set[str]:
-    if not state_path.exists():
-        return set()
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-        return set(data.get("_gen_used_repos", []))
-    except Exception as exc:
-        print(f"  WARNING: could not read used repos from state file: {exc}")
-        return set()
+def _load_used_repos(state_path: Path, base_dir: Path | None = None) -> set[str]:
+    repos: set[str] = set()
+    # Source 1: current delivery state
+    if state_path.exists():
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+            repos.update(data.get("_gen_used_repos", []))
+        except Exception as exc:
+            print(f"  WARNING: could not read used repos from state file: {exc}")
+    # Source 2: all other delivery_*/pipeline_state.json (cross-delivery dedup)
+    if base_dir:
+        for ps in sorted(base_dir.glob("delivery_*/pipeline_state.json")):
+            if ps == state_path:
+                continue
+            try:
+                d = json.loads(ps.read_text(encoding="utf-8"))
+                found = d.get("_gen_used_repos", [])
+                repos.update(found)
+            except Exception:
+                pass
+    if repos and base_dir:
+        print(f"  Loaded {len(repos)} used repos (cross-delivery dedup)")
+    return repos
 
 
 def _save_used_repo(state_path: Path, repo_name: str) -> None:
@@ -505,6 +515,34 @@ def _save_used_repo(state_path: Path, repo_name: str) -> None:
             _do_save()
 
 
+def _clone_from_pool(
+    repo_name: str,
+    dest_root: Path,
+    task_id: str,
+    http_proxy: str = "",
+    source: str = "github",
+) -> tuple[GitHubRepo, Path] | None:
+    """Clone a repo from the pool by its full_name."""
+    # Determine clone URL from full_name and source
+    if source == "gitee":
+        clone_url = f"https://gitee.com/{repo_name}.git"
+    else:
+        clone_url = f"https://github.com/{repo_name}.git"
+
+    repo = GitHubRepo(
+        full_name=repo_name,
+        clone_url=clone_url,
+        description="",
+        language="",
+        stars=0,
+        updated_at="",
+    )
+    path = clone_project(repo, dest_root, task_id, http_proxy=http_proxy)
+    if path:
+        return repo, path
+    return None
+
+
 async def generate_single(
     slot: TaskSlot,
     task_id: str,
@@ -518,6 +556,7 @@ async def generate_single(
     toml_lock: asyncio.Lock | None = None,
     total_timeout: int = _GEN_TOTAL_TIMEOUT,
     source: str = "github",
+    pool_assignments: dict[str, list[str]] | None = None,
 ) -> bool:
     """Generate a single task from a slot."""
     t_start = time.time()
@@ -543,17 +582,35 @@ async def generate_single(
             print(f"  ERROR: local path not found: {from_local}")
             return False
     else:
-        print(f"  [{_elapsed()}] Searching {source} for {slot.domain}/{slot.language} projects...")
-        if source == "gitee":
-            result = await asyncio.to_thread(
-                search_and_clone_gitee, slot.domain, slot.language, task_id, clone_dir,
-                used_repos, config.gitee_token, config.http_proxy,
-            )
-        else:
-            result = await asyncio.to_thread(
-                search_and_clone, slot.domain, slot.language, task_id, clone_dir,
-                used_repos, config.github_token, config.http_proxy,
-            )
+        result = None
+        # Try pool first
+        if pool_assignments:
+            pool_key = f"{slot.domain}:{slot.language}"
+            available = [r for r in pool_assignments.get(pool_key, []) if r not in used_repos]
+            if available:
+                pick = available[0]
+                print(f"  [{_elapsed()}] Cloning from pool: {pick}")
+                result = await asyncio.to_thread(
+                    _clone_from_pool, pick, clone_dir, task_id, config.http_proxy, source,
+                )
+                if not result:
+                    print(f"  [{_elapsed()}] Pool clone failed, falling back to search")
+            else:
+                print(f"  [{_elapsed()}] Pool exhausted for {pool_key}, falling back to search")
+
+        # Fallback to search
+        if not result:
+            print(f"  [{_elapsed()}] Searching {source} for {slot.domain}/{slot.language} projects...")
+            if source == "gitee":
+                result = await asyncio.to_thread(
+                    search_and_clone_gitee, slot.domain, slot.language, task_id, clone_dir,
+                    used_repos, config.gitee_token, config.http_proxy,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    search_and_clone, slot.domain, slot.language, task_id, clone_dir,
+                    used_repos, config.github_token, config.http_proxy,
+                )
         if not result:
             print(f"  [{_elapsed()}] {source} search/clone failed")
             return False
@@ -681,6 +738,7 @@ async def generate_batch(
     api_sem: asyncio.Semaphore | None = None,
     total_timeout: int = _GEN_TOTAL_TIMEOUT,
     source: str = "github",
+    pool_assignments: dict[str, list[str]] | None = None,
 ) -> int:
     """Generate multiple tasks from a single project.
 
@@ -717,19 +775,37 @@ async def generate_batch(
             print(f"  ERROR: local path not found: {from_local}")
             return 0
     else:
-        print(f"  [{_elapsed()}] Searching {source} for {domain}/{language} projects...")
+        result = None
         lock_ctx = repo_lock if repo_lock else nullcontext()
         async with lock_ctx:
-            if source == "gitee":
-                result = await asyncio.to_thread(
-                    search_and_clone_gitee, domain, language, "_projects", clone_dir,
-                    used_repos, config.gitee_token, config.http_proxy,
-                )
-            else:
-                result = await asyncio.to_thread(
-                    search_and_clone, domain, language, "_projects", clone_dir,
-                    used_repos, config.github_token, config.http_proxy,
-                )
+            # Try pool first
+            if pool_assignments:
+                pool_key = f"{domain}:{language}"
+                available = [r for r in pool_assignments.get(pool_key, []) if r not in used_repos]
+                if available:
+                    pick = available[0]
+                    print(f"  [{_elapsed()}] Cloning from pool: {pick}")
+                    result = await asyncio.to_thread(
+                        _clone_from_pool, pick, clone_dir, "_projects", config.http_proxy, source,
+                    )
+                    if not result:
+                        print(f"  [{_elapsed()}] Pool clone failed, falling back to search")
+                else:
+                    print(f"  [{_elapsed()}] Pool exhausted for {pool_key}, falling back to search")
+
+            # Fallback to search
+            if not result:
+                print(f"  [{_elapsed()}] Searching {source} for {domain}/{language} projects...")
+                if source == "gitee":
+                    result = await asyncio.to_thread(
+                        search_and_clone_gitee, domain, language, "_projects", clone_dir,
+                        used_repos, config.gitee_token, config.http_proxy,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        search_and_clone, domain, language, "_projects", clone_dir,
+                        used_repos, config.github_token, config.http_proxy,
+                    )
             if result:
                 repo, project_path = result
                 repo_name = repo.full_name
@@ -1090,7 +1166,18 @@ async def generate(
 ) -> int:
     """Main generation entry point."""
     state_path = config.state_path
-    used_repos = _load_used_repos(state_path)
+    used_repos = _load_used_repos(state_path, config.base_dir)
+
+    # Load pool assignments if available
+    pool_assignments: dict[str, list[str]] | None = None
+    if config.person_id:
+        from ctpipe.pool import load_pool_assignments
+        pool_assignments = load_pool_assignments(config.base_dir, config.person_id)
+        if pool_assignments:
+            total_pool = sum(len(v) for v in pool_assignments.values())
+            print(f"Loaded pool assignments for person {config.person_id}: {total_pool} repos across {len(pool_assignments)} domain/language pairs")
+        else:
+            print(f"No pool assignments found for person {config.person_id} (will use search)")
 
     if per_project > 1:
         num_projects = -(-count // per_project)  # ceil division
@@ -1156,7 +1243,7 @@ async def generate(
                 used_repos, state_path, from_local, dry_run,
                 toml_lock=toml_lock, repo_lock=repo_lock,
                 api_sem=api_sem, total_timeout=total_timeout,
-                source=source,
+                source=source, pool_assignments=pool_assignments,
             )
             return successes, batch_size
 
@@ -1179,7 +1266,7 @@ async def generate(
                 slot, task_id, config, env, effective_clone_dir,
                 used_repos, state_path, from_local, dry_run,
                 toml_lock=toml_lock, total_timeout=total_timeout,
-                source=source,
+                source=source, pool_assignments=pool_assignments,
             )
             if ok:
                 total_success += 1

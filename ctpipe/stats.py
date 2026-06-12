@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import statistics
 from pathlib import Path
+from typing import Any, Callable
 
 from ctpipe.config import BatchConfig, select_delivery_tasks
 from ctpipe.state import PipelineState
@@ -22,6 +23,18 @@ _DONE_STATUSES = {"done"}
 _PARTIAL_STATUSES = {"partial"}
 _FAILED_STATUSES = {"failed"}
 _PENDING_STATUSES = {"", "draft"}
+
+# Whitelist of field names allowed in --filter expressions.
+# Restricting to known TaskConfig / finalize-state fields prevents
+# expression-injection through arbitrary dict look-ups.
+_FILTER_FIELD_WHITELIST = frozenset({
+    "task_type",
+    "domain",
+    "language",
+    "bad_pattern",
+    "qwen_passrate",
+    "claude_passrate",
+})
 
 
 def _classify(status: str) -> str:
@@ -93,7 +106,7 @@ def _collect_passrate_stats(
         for model in models:
             key = f"{model}_passrate"
             value = info.get(key)
-            if isinstance(value, (int, float)) and value > 0:
+            if isinstance(value, (int, float)):
                 per_model[model].append(float(value))
 
     result: dict[str, dict[str, float]] = {}
@@ -126,8 +139,8 @@ def _collect_passrate_diff(
         a_val = info.get(f"{model_a}_passrate")
         b_val = info.get(f"{model_b}_passrate")
         if (
-            isinstance(a_val, (int, float)) and a_val > 0
-            and isinstance(b_val, (int, float)) and b_val > 0
+            isinstance(a_val, (int, float))
+            and isinstance(b_val, (int, float))
         ):
             diffs.append(float(b_val) - float(a_val))
 
@@ -351,7 +364,7 @@ def _collect_per_task(
         fin = state.get(tid, "finalize")
         for model in models:
             pr = fin.get(f"{model}_passrate")
-            if isinstance(pr, (int, float)) and pr > 0:
+            if isinstance(pr, (int, float)):
                 task_detail[f"{model}_passrate"] = round(float(pr), 4)
         # Attach duration_s from run and score stages when available.
         for stage in ("run", "score"):
@@ -436,12 +449,337 @@ def _print_json(
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def _tokenize_filter(expr: str) -> list[tuple[str, Any]]:
+    """Tokenize a filter expression into (type, value) pairs.
+
+    Supported syntax:
+      - Comparisons: ``field = 'value'``, ``field < 0.5``, etc.
+      - Operators: ``=``, ``!=``, ``<``, ``>``, ``<=``, ``>=``
+      - Logic: ``AND``, ``OR`` (case-insensitive)
+      - Grouping: ``(`` / ``)``
+      - Values: single- or double-quoted strings, integers, floats
+      - Fields: ``[a-zA-Z_][a-zA-Z0-9_]*``
+    """
+    tokens: list[tuple[str, Any]] = []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+
+        if ch in (' ', '\t', '\n'):
+            i += 1
+            continue
+
+        if ch == '(':
+            tokens.append(('LPAREN', '('))
+            i += 1
+            continue
+        if ch == ')':
+            tokens.append(('RPAREN', ')'))
+            i += 1
+            continue
+
+        if ch in ('"', "'"):
+            quote = ch
+            j = i + 1
+            while j < len(expr) and expr[j] != quote:
+                if expr[j] == '\\':
+                    j += 1
+                j += 1
+            if j >= len(expr):
+                raise ValueError(f"Unterminated string literal at position {i}")
+            tokens.append(('STRING', expr[i + 1:j]))
+            i = j + 1
+            continue
+
+        if ch in ('!', '<', '>', '='):
+            if i + 1 < len(expr) and expr[i + 1] == '=':
+                tokens.append(('OP', expr[i:i + 2]))
+                i += 2
+            else:
+                if ch == '=':
+                    tokens.append(('OP', '='))
+                else:
+                    tokens.append(('OP', ch))
+                i += 1
+            continue
+
+        if ch.isdigit() or (ch == '-' and i + 1 < len(expr) and expr[i + 1].isdigit()):
+            j = i
+            if ch == '-':
+                j += 1
+            while j < len(expr) and expr[j].isdigit():
+                j += 1
+            if j < len(expr) and expr[j] == '.':
+                j += 1
+                while j < len(expr) and expr[j].isdigit():
+                    j += 1
+                tokens.append(('NUMBER', float(expr[i:j])))
+            else:
+                tokens.append(('NUMBER', int(expr[i:j])))
+            i = j
+            continue
+
+        if ch.isalpha() or ch == '_':
+            j = i
+            while j < len(expr) and (expr[j].isalnum() or expr[j] == '_'):
+                j += 1
+            word = expr[i:j]
+            upper = word.upper()
+            if upper == 'AND':
+                tokens.append(('AND', 'AND'))
+            elif upper == 'OR':
+                tokens.append(('OR', 'OR'))
+            else:
+                tokens.append(('FIELD', word))
+            i = j
+            continue
+
+        raise ValueError(f"Unexpected character {ch!r} at position {i}")
+
+    return tokens
+
+
+def _parse_filter_expr(expr: str) -> Callable[[dict[str, Any]], bool]:
+    """Parse a filter expression into a callable predicate.
+
+    Example::
+
+        fn = _parse_filter_expr("task_type = 'bug-fix' AND qwen_passrate < 0.5")
+        fn({"task_type": "bug-fix", "qwen_passrate": 0.3})  # True
+
+    Grammar::
+
+        expr       → or_expr
+        or_expr    → and_expr ( 'OR' and_expr )*
+        and_expr   → atom ( 'AND' atom )*
+        atom       → '(' or_expr ')' | comparison
+        comparison → FIELD OP VALUE
+    """
+    tokens = _tokenize_filter(expr)
+    if not tokens:
+        raise ValueError("Empty filter expression")
+
+    fn, pos = _parse_or_expr(tokens, 0)
+    if pos < len(tokens):
+        raise ValueError(f"Unexpected token at position {pos}: {tokens[pos][1]!r}")
+    return fn
+
+
+def _parse_or_expr(tokens: list[tuple[str, Any]], pos: int) -> tuple[Callable, int]:
+    fn, pos = _parse_and_expr(tokens, pos)
+    fns = [fn]
+    while pos < len(tokens) and tokens[pos][0] == 'OR':
+        pos += 1
+        fn, pos = _parse_and_expr(tokens, pos)
+        fns.append(fn)
+    if len(fns) == 1:
+        return fns[0], pos
+    captured = list(fns)
+    return lambda record, _fns=captured: any(f(record) for f in _fns), pos
+
+
+def _parse_and_expr(tokens: list[tuple[str, Any]], pos: int) -> tuple[Callable, int]:
+    fn, pos = _parse_atom(tokens, pos)
+    fns = [fn]
+    while pos < len(tokens) and tokens[pos][0] == 'AND':
+        pos += 1
+        fn, pos = _parse_atom(tokens, pos)
+        fns.append(fn)
+    if len(fns) == 1:
+        return fns[0], pos
+    captured = list(fns)
+    return lambda record, _fns=captured: all(f(record) for f in _fns), pos
+
+
+def _parse_atom(tokens: list[tuple[str, Any]], pos: int) -> tuple[Callable, int]:
+    if pos >= len(tokens):
+        raise ValueError("Unexpected end of expression")
+
+    if tokens[pos][0] == 'LPAREN':
+        pos += 1
+        fn, pos = _parse_or_expr(tokens, pos)
+        if pos >= len(tokens) or tokens[pos][0] != 'RPAREN':
+            raise ValueError("Missing closing ')'")
+        return fn, pos + 1
+
+    if pos + 2 >= len(tokens):
+        raise ValueError("Incomplete comparison at end of expression")
+    if tokens[pos][0] != 'FIELD':
+        raise ValueError(f"Expected field name, got {tokens[pos][1]!r}")
+    if tokens[pos + 1][0] != 'OP':
+        raise ValueError(f"Expected operator, got {tokens[pos + 1][1]!r}")
+
+    field = tokens[pos][1]
+    if field not in _FILTER_FIELD_WHITELIST:
+        raise ValueError(
+            f"Invalid filter field {field!r}. "
+            f"Allowed: {', '.join(sorted(_FILTER_FIELD_WHITELIST))}"
+        )
+    op = tokens[pos + 1][1]
+    value = tokens[pos + 2][1]
+    pos += 3
+    return _make_comparison(field, op, value), pos
+
+
+def _make_comparison(field: str, op: str, value: Any) -> Callable[[dict[str, Any]], bool]:
+    """Build a single-field comparison predicate."""
+    def predicate(record: dict[str, Any]) -> bool:
+        record_value = record.get(field)
+        if record_value is None:
+            return False
+
+        compare_value = value
+
+        # Bool coercion: allow ``threshold_ok = True`` where the value
+        # was parsed as the FIELD token "True".
+        if isinstance(record_value, bool) and isinstance(value, str):
+            lower = value.lower()
+            if lower == 'true':
+                compare_value = True
+            elif lower == 'false':
+                compare_value = False
+
+        # Numeric coercion when the literal is a number.
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                record_value = float(record_value)
+                compare_value = float(value)
+            except (ValueError, TypeError):
+                pass
+
+        match op:
+            case '=':
+                return record_value == compare_value
+            case '!=':
+                return record_value != compare_value
+            case '<':
+                return record_value < compare_value
+            case '>':
+                return record_value > compare_value
+            case '<=':
+                return record_value <= compare_value
+            case '>=':
+                return record_value >= compare_value
+            case _:
+                raise ValueError(f"Unknown operator: {op!r}")
+
+    return predicate
+
+
+def _build_task_records(
+    config: BatchConfig,
+    tasks: list,
+    state: PipelineState,
+    models: list[str],
+) -> list[dict[str, Any]]:
+    """Build flat per-task records merging TaskConfig fields with finalize state."""
+    records: list[dict[str, Any]] = []
+    for task in tasks:
+        fin = state.get(task.id, "finalize")
+        record: dict[str, Any] = {
+            "id": task.id,
+            "task_type": task.task_type,
+            "domain": task.domain,
+            "language": task.language,
+            "bad_pattern": task.bad_pattern,
+            "task_title": task.task_title,
+        }
+        for model in models:
+            pr = fin.get(f"{model}_passrate")
+            if isinstance(pr, (int, float)):
+                record[f"{model}_passrate"] = round(float(pr), 4)
+            else:
+                record[f"{model}_passrate"] = None
+        record["finalize_status"] = fin.get("status", "")
+        record["threshold_ok"] = bool(fin.get("threshold_ok", False))
+        records.append(record)
+    return records
+
+
+def _apply_filter(
+    records: list[dict[str, Any]],
+    filter_fn: Callable[[dict[str, Any]], bool],
+) -> list[dict[str, Any]]:
+    """Return only records that satisfy the filter predicate."""
+    return [r for r in records if filter_fn(r)]
+
+
+def _group_by_fields(
+    records: list[dict[str, Any]],
+    group_fields: list[str],
+    models: list[str],
+) -> list[dict[str, Any]]:
+    """Group records independently per field and compute passrate stats.
+
+    Returns a list of grouping dicts, one per field, each containing::
+
+        {
+            "field": "task_type",
+            "count": 59,
+            "groups": [
+                {
+                    "group_value": "bug-fix",
+                    "count": 12,
+                    "passrate_stats": {
+                        "qwen":  {"min": ..., "max": ..., "mean": ..., "count": ...},
+                        "claude": {...},
+                    },
+                },
+                ...
+            ],
+        }
+    """
+    groupings: list[dict[str, Any]] = []
+    for field in group_fields:
+        buckets: dict[Any, list[dict[str, Any]]] = {}
+        for record in records:
+            value = record.get(field, "")
+            buckets.setdefault(value, []).append(record)
+
+        groups: list[dict[str, Any]] = []
+        for value, bucket_records in buckets.items():
+            entry: dict[str, Any] = {
+                "group_value": value,
+                "count": len(bucket_records),
+                "passrate_stats": {},
+            }
+            for model in models:
+                values = [
+                    r[f"{model}_passrate"]
+                    for r in bucket_records
+                    if r.get(f"{model}_passrate") is not None
+                ]
+                if values:
+                    entry["passrate_stats"][model] = {
+                        "min": min(values),
+                        "max": max(values),
+                        "mean": statistics.mean(values),
+                        "count": len(values),
+                    }
+            groups.append(entry)
+        groupings.append({
+            "field": field,
+            "count": len(records),
+            "groups": groups,
+        })
+    return groupings
+
+
+def _format_pr(stats: dict[str, Any] | None) -> str:
+    """Format a passrate stats dict as a one-line summary."""
+    if not stats:
+        return "N/A"
+    return f"min={stats['min']:.4f}  max={stats['max']:.4f}  mean={stats['mean']:.4f}  n={stats['count']}"
+
+
 def show_stats(
     config: BatchConfig,
     task_ids: list[str] | None = None,
     models: list[str] | None = None,
     fmt: str = "table",
     timing: bool = False,
+    filter_expr: str | None = None,
+    group_by: str | None = None,
 ) -> bool:
     """Print aggregate pipeline statistics and return True if all done."""
     models = models or ["qwen", "claude"]
@@ -463,6 +801,118 @@ def show_stats(
         return False
 
     tids = [t.id for t in tasks]
+
+    # --- Filter & Group-by ------------------------------------------------
+    task_records: list[dict[str, Any]] | None = None
+    if filter_expr or group_by:
+        task_records = _build_task_records(config, tasks, state, models)
+
+    if filter_expr:
+        filter_fn = _parse_filter_expr(filter_expr)
+        total_before = len(task_records)  # type: ignore[arg-type]
+        task_records = _apply_filter(task_records, filter_fn)  # type: ignore[arg-type]
+        tids = [r["id"] for r in task_records]
+        if not tids:
+            if fmt == "json":
+                print(json.dumps({
+                    "filter": filter_expr,
+                    "total_before_filter": total_before,
+                    "total_after_filter": 0,
+                    "message": "No tasks match the filter",
+                }, indent=2, ensure_ascii=False))
+            else:
+                print(f"\nNo tasks match filter: {filter_expr}")
+                print(f"({total_before} task(s) before filter, 0 after)")
+            return True
+
+    if group_by:
+        group_fields = [f.strip() for f in group_by.split(",") if f.strip()]
+        if task_records and group_fields:
+            valid_fields = set(task_records[0].keys())
+            for gf in group_fields:
+                if gf not in valid_fields:
+                    print(f"Invalid group-by field: {gf!r}. Valid: {sorted(valid_fields)}")
+                    return False
+        groupings = _group_by_fields(task_records, group_fields, models)  # type: ignore[arg-type]
+
+        stage_rows = _collect_stage_counts(state, tids, models)
+        all_ok = all(
+            int(row["failed"]) == 0 and int(row["pending"]) == 0  # type: ignore[arg-type]
+            for row in stage_rows
+        )
+
+        if fmt == "json":
+            json_groupings: list[dict[str, Any]] = []
+            for g in groupings:
+                json_groupings.append({
+                    "group_key": g["field"],
+                    "count": g["count"],
+                    "groups": [
+                        {
+                            "group_value": grp["group_value"],
+                            "count": grp["count"],
+                            "passrate_stats": {
+                                m: {
+                                    "min": round(s["min"], 4),
+                                    "max": round(s["max"], 4),
+                                    "mean": round(s["mean"], 4),
+                                    "count": s["count"],
+                                }
+                                for m, s in grp["passrate_stats"].items()
+                            },
+                        }
+                        for grp in g["groups"]
+                    ],
+                })
+            payload: dict[str, Any] = {"groupings": json_groupings}
+            if filter_expr:
+                payload["filter"] = filter_expr
+                payload["total_before_filter"] = total_before
+                payload["total_after_filter"] = len(task_records)
+            payload["summary"] = {
+                "total": len(task_records),
+                "all_ok": all_ok,
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            total_tasks = len(task_records)  # type: ignore[arg-type]
+            for gi, g in enumerate(groupings):
+                if gi > 0:
+                    print()
+                hdr = f"\n{'=' * 70}"
+                print(hdr)
+                if filter_expr:
+                    print(f"  PASSRATE BY {g['field'].upper()}"
+                          f"  (filtered {total_tasks}/{total_before})")
+                else:
+                    print(f"  PASSRATE BY {g['field'].upper()}")
+                print(f"{'=' * 70}")
+                col_hdr = f"  {'Group':<20} {'Model':<10} {'Min':>8} {'Max':>8} {'Mean':>8} {'Count':>6}"
+                print(col_hdr)
+                print(f"  {'-' * 62}")
+                for grp in g["groups"]:
+                    value_str = str(grp["group_value"]) if grp["group_value"] != "" else "(empty)"
+                    label = f"{value_str} ({grp['count']})"
+                    first = True
+                    for model in models:
+                        pr = grp["passrate_stats"].get(model)
+                        if first:
+                            print(f"  {label:<20} {model:<10} {_format_pr(pr)}")
+                            first = False
+                        else:
+                            print(f"  {'':<20} {model:<10} {_format_pr(pr)}")
+            print(f"\n{'=' * 70}")
+            if filter_expr:
+                print(f"  Total: {total_tasks} task(s) after filter"
+                      f" (from {total_before})")
+            else:
+                print(f"  Total: {total_tasks} task(s)")
+            if all_ok:
+                print("  All stages OK")
+            else:
+                print("  WARNING: some stages have failures or pending work")
+            print(f"{'=' * 70}")
+        return all_ok
 
     stage_rows = _collect_stage_counts(state, tids, models)
     passrate_stats = _collect_passrate_stats(state, tids, models)

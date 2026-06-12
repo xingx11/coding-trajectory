@@ -60,3 +60,12 @@ scripts/
 # One-off utility scripts
 _rename_criteria.py
 fix_passrates.py
+
+# Generated pool assignments (regenerated from project_pool.json)
+pool_assignments.json
+
+# Internal binary spreadsheets (not suitable for git)
+docs/*.xlsx
+
+# Raw trajectory analysis dumps (data, not source)
+docs/analysis/0000(1)/

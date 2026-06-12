@@ -26,6 +26,30 @@ from ctpipe.toml_utils import Criterion, calc_passrate, has_custom_descriptions,
 from ctpipe.trajectory import extract_for_scoring
 
 
+def build_context_block(task_context: dict[str, str] | None) -> str:
+    """Build a 任务背景 section from task context dict. Shared by score and rescore."""
+    if not task_context:
+        return ""
+    ctx_parts: list[str] = []
+    if task_context.get("project_name"):
+        ctx_parts.append(f"- 项目：{task_context['project_name']}")
+    if task_context.get("language"):
+        ctx_parts.append(f"- 技术栈：{task_context['language']}")
+    if task_context.get("task_type"):
+        ctx_parts.append(f"- 任务类型：{task_context['task_type']}")
+    if task_context.get("task_title"):
+        ctx_parts.append(f"- 任务标题：{task_context['task_title']}")
+    if task_context.get("task_description"):
+        ctx_parts.append(f"- 任务描述：{task_context['task_description']}")
+    if task_context.get("acceptance_criteria"):
+        ctx_parts.append(f"- 验收标准：{task_context['acceptance_criteria']}")
+    if task_context.get("project_summary"):
+        ctx_parts.append(f"- 项目概要：\n{task_context['project_summary']}")
+    if ctx_parts:
+        return "\n## 任务背景\n\n" + "\n".join(ctx_parts) + "\n"
+    return ""
+
+
 def _build_scoring_prompt(
     fixed_criteria: list[str] | None = None,
     custom_criteria: list[Criterion] | None = None,
@@ -84,25 +108,7 @@ def _build_scoring_prompt(
         )
 
     # Build task context block if available
-    context_block = ""
-    if task_context:
-        ctx_parts: list[str] = []
-        if task_context.get("project_name"):
-            ctx_parts.append(f"- 项目：{task_context['project_name']}")
-        if task_context.get("language"):
-            ctx_parts.append(f"- 技术栈：{task_context['language']}")
-        if task_context.get("task_type"):
-            ctx_parts.append(f"- 任务类型：{task_context['task_type']}")
-        if task_context.get("task_title"):
-            ctx_parts.append(f"- 任务标题：{task_context['task_title']}")
-        if task_context.get("task_description"):
-            ctx_parts.append(f"- 任务描述：{task_context['task_description']}")
-        if task_context.get("acceptance_criteria"):
-            ctx_parts.append(f"- 验收标准：{task_context['acceptance_criteria']}")
-        if task_context.get("project_summary"):
-            ctx_parts.append(f"- 项目概要：\n{task_context['project_summary']}")
-        if ctx_parts:
-            context_block = "\n## 任务背景\n\n" + "\n".join(ctx_parts) + "\n"
+    context_block = build_context_block(task_context)
 
     # Build passrate constraint block if hint provided
     passrate_block = ""
@@ -131,6 +137,39 @@ def _build_scoring_prompt(
 - weight 必须使用评分模板中指定的权重值（与架构边界/安全合规相关的维度为 2.0，其余为 1.0）
 - description 必须使用上面提供的中文完整描述，保持一行字符串
 
+## 高分校准与封顶规则（必须遵守）
+
+评分以 3 分为基准，根据证据上下调整：
+- 3分 = 主路径有推进但有明显缺口
+- 4分 = 主路径基本闭环，仅有轻微问题
+- 5分 = 罕见高分，需要正面证据闭环、无反面证据、无相关 Bad Pattern
+
+以下情况必须封顶：
+- 该维度在轨迹中缺少直接证据 → 最高 3 分；完全无证据 → 通常 2 分以下
+- 任务要求改代码/写文件但轨迹中没有修改证据 → delivery/engineering 维度最高 2 分
+- 任务要求验证但没有运行测试/构建/lint → testing 维度最高 2 分；delivery 维度最高 4 分
+- 仅基于模型最终自述评分，无 tool/file/test 证据 → evidence 维度最高 2 分；相关 delivery 维度最高 3 分
+- 工具报错且未有效补救 → tool_usage 维度最高 3 分；若导致任务未完成则最高 2 分
+- 命中 Bad Pattern → 相关维度通常最高 3 分；严重的最高 2 分
+- 给 5 分时，rationale 必须正面论证为什么没有显著扣分点；如果只能写出模糊夸奖，最高给 4 分
+
+## 轨迹截断公平性（必须遵守）
+
+如果轨迹明显在中途截断（如 followup 未全部执行、对话突然中断、超时终止）：
+- 评分必须基于已完成部分的实际质量，不得因截断导致的不完整而额外惩罚
+- delivery/completeness 类维度可以因任务未完成而合理扣分，但必须在 rationale 中注明"轨迹截断"
+- 其他维度（如 semantic_understanding、tool_usage、context_exploration）应仅评价已执行部分的表现
+- 禁止因截断而给所有维度统一低分——截断前的高质量工作仍应获得相应评价
+- 如果两个模型的轨迹长度差异显著（如一个有 5 轮对话，另一个只有 2 轮），这可能是截断而非能力差异
+
+## 需求变更归因（必须遵守）
+
+如果用户在对话过程中改变了需求（如重命名属性、调整 API 设计、变更功能范围）：
+- 由用户需求变更导致的模型返工/迭代不应视为模型能力不足
+- 应区分"模型自身理解错误导致的返工"和"用户主动变更需求导致的返工"
+- 评价 stage_progression / planning 类维度时，用户需求变更造成的反复不应扣分
+- 模型在需求变更后能快速适应并正确实现新要求，应视为正面表现
+
 ## rationale 写作要求（严格遵守）
 
 - 必须使用中文
@@ -141,11 +180,31 @@ def _build_scoring_prompt(
   × "整体看，XXX有一些有效推进，但稳定性和完整性不够"
   × "这项给X分比较稳/更贴近实际"
   × "因此给低中档分数" / "所以给中档分"
+  × "推进痕迹是有的，只是前后反复比较多"
+  × "前面先去看了...后面再回到...补细节"
+  × "最终至少落成了...这一类实物"
   × 任何以"我会给这一项X分"开头的句式
 - 合格示例：
   ✓ "改了三个文件但漏掉了edge case的单元测试，validate那步直接跳过了"
   ✓ "prompt里要求加日志，它确实加了logging，但log level全用的INFO，没按要求区分WARNING"
 - 不要提及 task ID (CT-XXXX) 或与另一个模型做比较
+
+## 分数与理由一致性（红线规则）
+
+- rationale 中描述的证据方向必须与分数方向一致
+- 如果 rationale 描述了负面事实（如"没有测试"、"未完成"、"有缺陷"、"不够"、"缺少"），分数不得为 4 或 5
+- 如果 rationale 描述了正面事实（如"完整实现"、"覆盖全面"、"准确定位"），分数不得为 1 或 2
+- 禁止在 rationale 中写"给 X 分"——分数由 score 字段决定，rationale 只陈述事实
+
+## 输出前自检（必须执行）
+
+输出 TOML 前，逐条检查：
+1. 每个 score=5 的维度：rationale 是否有充分正面证据？是否触犯了封顶规则？
+2. 每个 score=1 的维度：rationale 是否确实描述了严重失败？
+3. rationale 中是否存在与 score 方向矛盾的描述？（如负面描述+高分）
+4. 是否有两条以上 rationale 使用了相似句式或模板？如有，必须重写使其独立
+5. description 中定义的各档位标准是否与实际给分对应？
+如发现矛盾，修正分数使其与证据一致，而非修改理由来匹配分数。
 
 ## Bad Pattern 识别
 
@@ -230,6 +289,12 @@ def extract_toml_section(raw: str) -> str:
         if idx > 0:
             cleaned = cleaned[:idx].rstrip()
             break
+
+    # Fallback: if cleaned doesn't look like TOML, try to find [[criterion]]
+    stripped = cleaned.lstrip()
+    if stripped and not stripped.startswith("[[") and "[[criterion]]" in cleaned:
+        idx = cleaned.index("[[criterion]]")
+        cleaned = cleaned[idx:]
 
     return cleaned
 
@@ -381,8 +446,8 @@ async def _auto_customize_criteria(
     task_ctx = build_task_context(task, config)
 
     # 2. Read collected trajectories for both models
-    qwen_jsonl = config.delivery_dir / "trajectories" / "qwen" / f"{task_id}.jsonl"
-    claude_jsonl = config.delivery_dir / "trajectories" / "claude" / f"{task_id}.jsonl"
+    qwen_jsonl = config.resolve_trajectory_path(task_id, "qwen")
+    claude_jsonl = config.resolve_trajectory_path(task_id, "claude")
 
     if not qwen_jsonl.exists() or not claude_jsonl.exists():
         print(f"  [{task_id}] Auto-customize skipped: missing trajectory JSONL")
@@ -473,7 +538,7 @@ async def score_single(
 
     raw_output = ""
     scored = None
-    output_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+    output_path = config.score_path(task.id, model_name)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1, MAX_SCORING_RETRIES + 1):
@@ -552,10 +617,154 @@ async def score_all(
     task_ids: list[str] | None = None,
     models: list[str] | None = None,
     auto_rescore: bool = False,
-) -> None:
-    state = PipelineState(config.state_path)
+    *,
+    dry_run: bool = False,
+    as_json: bool = False,
+) -> dict | None:
     models = models or ["qwen", "claude"]
     tasks = select_delivery_tasks(config, task_ids)
+
+    if dry_run:
+        state = PipelineState(config.state_path)
+        tasks_data = []
+        will_score = 0
+        will_skip = 0
+
+        if not as_json:
+            print("=" * 60)
+            print("  DRY RUN: score")
+            print("=" * 60)
+            print("\nCriteria modes:")
+            print("  custom_criteria  — rubric template with project-specific descriptions")
+            print("  fixed_criteria   — reuse dimensions from another model's scoring")
+            print("  free_selection   — AI selects 7-10 from 20 reference dimensions")
+
+        for task in tasks:
+            # Step 1: check for custom rubric template
+            custom_tpl_criteria = None
+            custom_tpl_source = None
+            for model_check in ("qwen", "claude"):
+                tpl_path = config.rubrics_dir / model_check / f"{task.id}.quality.toml"
+                if tpl_path.exists():
+                    try:
+                        tpl = read_quality_toml(tpl_path)
+                        if tpl and has_custom_descriptions(tpl):
+                            custom_tpl_criteria = tpl
+                            custom_tpl_source = model_check
+                            break
+                    except Exception:
+                        pass
+
+            # Step 2: if no custom template, check if auto-customize would trigger
+            auto_customize = False
+            if custom_tpl_criteria is None:
+                qwen_jsonl = config.resolve_trajectory_path(task.id, "qwen")
+                claude_jsonl = config.resolve_trajectory_path(task.id, "claude")
+                if qwen_jsonl.exists() and claude_jsonl.exists():
+                    auto_customize = True
+
+            # Step 3: check existing qwen score for dimension reuse
+            qwen_scored_names: list[str] | None = None
+            qwen_score_path = config.resolve_score_path(task.id, "qwen")
+            if qwen_score_path.exists():
+                try:
+                    qc = read_quality_toml(qwen_score_path)
+                    if qc and all(c.score >= 1 and c.rationale for c in qc):
+                        qwen_scored_names = [c.name for c in qc]
+                except Exception:
+                    pass
+
+            if not as_json:
+                print(f"\n[{task.id}]")
+
+            models_info = {}
+            for model_name in models:
+                already_done = state.is_done(task.id, "score", model_name)
+                score_path = config.resolve_score_path(task.id, model_name)
+                traj_path = config.resolve_trajectory_path(task.id, model_name)
+                traj_exists = traj_path.exists()
+
+                if already_done and score_path.exists():
+                    will_skip += 1
+                    # Determine what mode was used
+                    if custom_tpl_criteria:
+                        mode = "custom_criteria"
+                    elif qwen_scored_names and model_name == "claude":
+                        mode = "fixed_criteria"
+                    elif qwen_scored_names and model_name == "qwen":
+                        mode = "custom_criteria" if has_custom_descriptions(
+                            read_quality_toml(score_path)) else "free_selection"
+                    else:
+                        mode = "free_selection"
+                    models_info[model_name] = {
+                        "skip": True, "mode": mode,
+                        "trajectory": str(traj_path), "trajectory_exists": traj_exists,
+                    }
+                    if not as_json:
+                        print(f"  {model_name}: SKIP (already done)  mode={mode}")
+                    continue
+
+                will_score += 1
+                # Determine criteria mode for this model
+                if model_name == "qwen":
+                    if custom_tpl_criteria:
+                        mode = "custom_criteria"
+                        detail = f"from {custom_tpl_source} rubric template, {len(custom_tpl_criteria)} dims"
+                    elif auto_customize:
+                        mode = "custom_criteria"
+                        detail = "auto-customize will generate project-specific descriptions"
+                    else:
+                        mode = "free_selection"
+                        detail = "AI selects 7-10 from 20 reference dimensions"
+                else:
+                    if custom_tpl_criteria:
+                        mode = "custom_criteria"
+                        detail = f"from {custom_tpl_source} rubric template, {len(custom_tpl_criteria)} dims"
+                    elif qwen_scored_names:
+                        mode = "fixed_criteria"
+                        detail = f"reuse qwen's {len(qwen_scored_names)} dims: {', '.join(qwen_scored_names)}"
+                    else:
+                        mode = "free_selection"
+                        detail = "no qwen reference, AI selects independently"
+
+                models_info[model_name] = {
+                    "skip": False, "mode": mode, "detail": detail,
+                    "trajectory": str(traj_path), "trajectory_exists": traj_exists,
+                }
+                if not as_json:
+                    traj_status = "OK" if traj_exists else "MISSING"
+                    print(f"  {model_name}: RUN  mode={mode}")
+                    print(f"    detail: {detail}")
+                    print(f"    trajectory: {traj_path}  [{traj_status}]")
+
+            tasks_data.append({
+                "task_id": task.id,
+                "auto_customize": auto_customize,
+                "custom_template_source": custom_tpl_source,
+                "models": models_info,
+            })
+
+        if as_json:
+            return {
+                "criteria_modes": {
+                    "custom_criteria": "rubric template with project-specific descriptions",
+                    "fixed_criteria": "reuse dimensions from another model's scoring",
+                    "free_selection": "AI selects 7-10 from 20 reference dimensions",
+                },
+                "tasks": tasks_data,
+                "summary": {
+                    "total_slots": len(tasks) * len(models),
+                    "to_score": will_score,
+                    "skipped": will_skip,
+                },
+            }
+
+        print(f"\nTotal: {len(tasks)} task(s) x {len(models)} model(s) = "
+              f"{len(tasks) * len(models)} slot(s): "
+              f"{will_score} to score, {will_skip} already done")
+        return
+
+    state = PipelineState(config.state_path)
     sem = asyncio.Semaphore(config.max_parallel * 2)
 
     env = build_validated_env(config.claude)
@@ -585,7 +794,7 @@ async def score_all(
 
             # Check if qwen already scored — reuse its dimensions
             if "qwen" in models:
-                qwen_score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                qwen_score_path = config.resolve_score_path(task.id, "qwen")
                 if state.is_done(task.id, "score", "qwen") and qwen_score_path.exists():
                     # If custom template exists, check if existing score uses it
                     if custom_crit:
@@ -643,13 +852,13 @@ async def score_all(
 
                 # If qwen wasn't in models but has existing scores, reuse its dimensions
                 if selected_names is None:
-                    qwen_score_path = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                    qwen_score_path = config.resolve_score_path(task.id, "qwen")
                     if qwen_score_path.exists():
                         selected_names = _read_existing_criteria_names(qwen_score_path)
                         if selected_names:
                             print(f"[{task.id}] Reusing existing qwen dimensions ({len(selected_names)} criteria)")
 
-                claude_score_path = config.delivery_dir / "scores" / "claude" / f"{task.id}.quality.toml"
+                claude_score_path = config.resolve_score_path(task.id, "claude")
                 if state.is_done(task.id, "score", "claude") and claude_score_path.exists():
                     # If custom template exists, check if existing score uses it
                     if custom_crit:
@@ -688,7 +897,7 @@ async def score_all(
                     # Try to read full criteria (with descriptions) from qwen's scored file
                     # to avoid losing custom descriptions in the fixed_criteria path
                     qwen_full_crit = None
-                    qwen_scored = config.delivery_dir / "scores" / "qwen" / f"{task.id}.quality.toml"
+                    qwen_scored = config.resolve_score_path(task.id, "qwen")
                     if qwen_scored.exists():
                         try:
                             qc = read_quality_toml(qwen_scored)
@@ -718,7 +927,7 @@ async def score_all(
             for model_name in models:
                 if model_name not in ("qwen", "claude"):
                     if state.is_done(task.id, "score", model_name):
-                        score_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+                        score_path = config.resolve_score_path(task.id, model_name)
                         if score_path.exists():
                             print(f"[{task.id}/{model_name}] score already done, skipping")
                             continue

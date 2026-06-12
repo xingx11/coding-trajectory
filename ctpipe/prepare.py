@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ctpipe.config import SUBMISSION_FIELDNAMES, BatchConfig, TaskConfig, load_task_manifest, select_tasks, write_task_manifest
+from ctpipe.config import SUBMISSION_FIELDNAMES, BatchConfig, TaskConfig, load_task_manifest, model_stem, select_tasks, write_task_manifest
 from ctpipe.project_scan import SCAN_IGNORE
 from ctpipe.state import PipelineState
 
@@ -38,14 +38,39 @@ SETTINGS_LOCAL = {
 IGNORE_PATTERNS = shutil.ignore_patterns(*SCAN_IGNORE)
 
 
-def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> Path:
+def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> tuple[Path, str]:
+    """Clone project for a model. Returns (dest_path, commit_hash)."""
     dest = runs_root / f"{task.id}-{model}" / task.project_subdir
+    commit_hash = ""
+
     if dest.exists():
         print(f"  [skip] {dest} already exists")
-        return dest
+        # Try to read commit hash from existing clone
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(dest), capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                commit_hash = result.stdout.strip()
+        except OSError:
+            pass
+        return dest, commit_hash
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     src = task.project_path
+
+    # Record source commit hash before cloning
+    if (src / ".git").is_dir():
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(src), capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                commit_hash = result.stdout.strip()
+        except OSError:
+            pass
 
     if task.clone_method == "git" and (src / ".git").is_dir():
         subprocess.run(
@@ -64,7 +89,7 @@ def _clone_project(task: TaskConfig, model: str, runs_root: Path) -> Path:
         json.dumps(SETTINGS_LOCAL, indent=2),
         encoding="utf-8",
     )
-    return dest
+    return dest, commit_hash
 
 
 def _create_submission_csv(config: BatchConfig, csv_path: Path) -> None:
@@ -99,7 +124,7 @@ def _create_delivery_skeleton(config: BatchConfig) -> None:
     for task in _all_known_tasks(config):
         for model in ("qwen", "claude"):
             src_template = config.rubrics_dir / model / f"{task.id}.quality.toml"
-            dest_score = delivery_dir / "scores" / model / f"{task.id}.quality.toml"
+            dest_score = config.score_path(task.id, model)
             if src_template.exists() and not dest_score.exists():
                 shutil.copy2(src_template, dest_score)
 
@@ -108,7 +133,7 @@ def _create_delivery_skeleton(config: BatchConfig) -> None:
         _create_submission_csv(config, csv_path)
 
 
-def _build_metadata_content(task: TaskConfig) -> str:
+def _build_metadata_content(task: TaskConfig, commit_hash: str = "") -> str:
     followups_qwen = "\n".join(f"- {item}" for item in task.followups_qwen) or "- "
     followups_claude = "\n".join(f"- {item}" for item in task.followups_claude) or "- "
 
@@ -138,7 +163,7 @@ def _build_metadata_content(task: TaskConfig) -> str:
 - Project path: {task.project_path}
 - Source: local project / open-source project
 - Open-source repo URL:
-- Commit / branch / snapshot:
+- Commit / branch / snapshot: {commit_hash}
 
 ## Project Summary
 
@@ -155,7 +180,7 @@ def _build_metadata_content(task: TaskConfig) -> str:
 {task_desc_section}## Qwen Conversation
 
 - Session id:
-- Trajectory file: trajectories/qwen/{task.id}.jsonl
+- Trajectory file: trajectories/qwen/{model_stem(task.id, 'qwen')}.jsonl
 - Round count: {1 + len(task.followups_qwen)}
 - Prompt strategy: same-theme / different-follow-up / related-task
 - Initial prompt:
@@ -173,7 +198,7 @@ def _build_metadata_content(task: TaskConfig) -> str:
 ## Claude Conversation
 
 - Session id:
-- Trajectory file: trajectories/claude/{task.id}.jsonl
+- Trajectory file: trajectories/claude/{model_stem(task.id, 'claude')}.jsonl
 - Round count: {1 + len(task.followups_claude)}
 - Prompt strategy: same-theme / different-follow-up / related-task
 - Initial prompt:
@@ -190,8 +215,8 @@ def _build_metadata_content(task: TaskConfig) -> str:
 
 ## Scoring
 
-- Qwen score file: scores/qwen/{task.id}.quality.toml
-- Claude score file: scores/claude/{task.id}.quality.toml
+- Qwen score file: scores/qwen/{model_stem(task.id, 'qwen')}.quality.toml
+- Claude score file: scores/claude/{model_stem(task.id, 'claude')}.quality.toml
 - Qwen passrate:
 - Claude passrate:
 
@@ -204,14 +229,117 @@ def _build_metadata_content(task: TaskConfig) -> str:
 """
 
 
-def _create_metadata_stub(config: BatchConfig, task: TaskConfig) -> None:
+def _create_metadata_stub(config: BatchConfig, task: TaskConfig, commit_hash: str = "") -> None:
     metadata_path = config.delivery_dir / "metadata" / f"{task.id}.md"
     if metadata_path.exists():
         return
-    metadata_path.write_text(_build_metadata_content(task), encoding="utf-8")
+    metadata_path.write_text(_build_metadata_content(task, commit_hash), encoding="utf-8")
 
 
-def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
+def prepare(config: BatchConfig, task_ids: list[str] | None = None, *, dry_run: bool = False, as_json: bool = False) -> dict | None:
+    all_tasks = _all_known_tasks(config)
+    tasks = select_tasks(all_tasks, task_ids)
+
+    if dry_run:
+        # Data tracking for JSON output
+        skeleton_dirs = [
+            "trajectories/qwen", "trajectories/claude",
+            "scores/qwen", "scores/claude", "metadata",
+        ]
+        skeleton_data = [
+            {"path": sub, "status": "exists" if (config.delivery_dir / sub).is_dir() else "will_create"}
+            for sub in skeleton_dirs
+        ]
+        tasks_data = []
+
+        if not as_json:
+            print("=" * 60)
+            print("  DRY RUN: prepare")
+            print("=" * 60)
+            print(f"\nDelivery skeleton: {config.delivery_dir}")
+            for sub in skeleton_dirs:
+                p = config.delivery_dir / sub
+                status = "exists" if p.is_dir() else "will create"
+                print(f"  {sub}/  [{status}]")
+
+        state = PipelineState(config.state_path)
+        will_clone = 0
+        will_skip = 0
+        for task in tasks:
+            src = task.project_path
+            is_git = task.clone_method == "git" and (src / ".git").is_dir()
+            method = "git clone --depth 1" if is_git else "copytree"
+
+            # Read source commit hash
+            commit = ""
+            if (src / ".git").is_dir():
+                try:
+                    r = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=str(src), capture_output=True, text=True,
+                    )
+                    if r.returncode == 0:
+                        commit = r.stdout.strip()[:12]
+                except OSError:
+                    pass
+
+            models_data = {}
+            for model in ("qwen", "claude"):
+                dest = config.runs_root / f"{task.id}-{model}" / task.project_subdir
+                models_data[model] = {"dest": str(dest), "exists": dest.exists()}
+
+            # Check if already done
+            done = state.is_done(task.id, "prepare")
+            if done:
+                prep_info = state.get(task.id, "prepare")
+                qwen_ok = Path(prep_info.get("qwen_dir", "")).is_dir()
+                claude_ok = Path(prep_info.get("claude_dir", "")).is_dir()
+                if qwen_ok and claude_ok:
+                    will_skip += 1
+                    tasks_data.append({
+                        "task_id": task.id, "skip": True,
+                        "source": str(src), "commit": commit,
+                        "method": method, "models": models_data,
+                    })
+                    if not as_json:
+                        print(f"\n[{task.id}]  SKIP (already done)")
+                        print(f"  source: {src}")
+                        if commit:
+                            print(f"  commit: {commit}")
+                        for model in ("qwen", "claude"):
+                            print(f"  {model}: {config.runs_root / f'{task.id}-{model}' / task.project_subdir}")
+                    continue
+
+            will_clone += 1
+            tasks_data.append({
+                "task_id": task.id, "skip": False,
+                "source": str(src), "commit": commit,
+                "method": method, "models": models_data,
+            })
+            if not as_json:
+                print(f"\n[{task.id}]  CLONE")
+                print(f"  source: {src}")
+                if commit:
+                    print(f"  commit: {commit}")
+                print(f"  method: {method}")
+                for model in ("qwen", "claude"):
+                    dest = config.runs_root / f"{task.id}-{model}" / task.project_subdir
+                    exists = dest.exists()
+                    status = " (exists — will skip)" if exists else ""
+                    print(f"  {model}: {dest}{status}")
+
+        if as_json:
+            return {
+                "delivery_dir": str(config.delivery_dir),
+                "skeleton": skeleton_data,
+                "tasks": tasks_data,
+                "summary": {"total": len(tasks), "to_clone": will_clone, "skipped": will_skip},
+            }
+
+        print(f"\nTotal: {len(tasks)} task(s), "
+              f"{will_clone} to clone, {will_skip} already done")
+        return
+
     state = PipelineState(config.state_path)
 
     print("Creating delivery directory skeleton...")
@@ -237,19 +365,23 @@ def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
                 claude_ok = Path(prep_info.get("claude_dir", "")).is_dir()
                 if qwen_ok and claude_ok:
                     print(f"[{task.id}] prepare already done, skipping")
-                    _create_metadata_stub(config, task)
+                    _create_metadata_stub(config, task, prep_info.get("commit_hash", ""))
                     continue
                 print(f"[{task.id}] prepare marked done but directories missing, re-cloning...")
 
             print(f"[{task.id}] Cloning project for qwen and claude...")
             try:
-                qwen_dir = _clone_project(task, "qwen", config.runs_root)
-                claude_dir = _clone_project(task, "claude", config.runs_root)
+                qwen_dir, qwen_hash = _clone_project(task, "qwen", config.runs_root)
+                claude_dir, claude_hash = _clone_project(task, "claude", config.runs_root)
             except (subprocess.CalledProcessError, OSError) as exc:
                 print(f"[{task.id}] ERROR: clone failed: {exc}")
                 state.set(task.id, "prepare", status="failed", error=str(exc))
                 continue
-            _create_metadata_stub(config, task)
+
+            commit_hash = qwen_hash or claude_hash
+            if qwen_hash and claude_hash and qwen_hash != claude_hash:
+                print(f"  [WARN] commit hash mismatch: qwen={qwen_hash[:8]} claude={claude_hash[:8]}")
+            _create_metadata_stub(config, task, commit_hash)
 
             state.set(
                 task.id,
@@ -257,6 +389,7 @@ def prepare(config: BatchConfig, task_ids: list[str] | None = None) -> None:
                 status="done",
                 qwen_dir=str(qwen_dir),
                 claude_dir=str(claude_dir),
+                commit_hash=commit_hash,
             )
 
     print("Prepare complete.")

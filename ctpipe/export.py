@@ -19,6 +19,7 @@ from ctpipe.config import (
     BatchConfig,
     TaskConfig,
     check_passrate_thresholds,
+    model_stem,
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
@@ -83,7 +84,9 @@ def _safe_scoring(
     task_id: str,
 ) -> dict[str, Any] | None:
     """Build scoring block for one model. Returns None when score file missing."""
-    score_path = delivery_dir / "scores" / model_name / f"{task_id}.quality.toml"
+    new_path = delivery_dir / "scores" / model_name / f"{model_stem(task_id, model_name)}.quality.toml"
+    legacy_path = delivery_dir / "scores" / model_name / f"{task_id}.quality.toml"
+    score_path = new_path if new_path.exists() else legacy_path
     if not score_path.exists():
         return None
 
@@ -125,8 +128,8 @@ def _build_threshold_check(
     """Build threshold_check block using config.check_passrate_thresholds."""
     qw = qwen_passrate if qwen_passrate is not None else 0.0
     cl = claude_passrate if claude_passrate is not None else 0.0
-    has_qwen = qwen_passrate is not None and qwen_passrate > 0
-    has_claude = claude_passrate is not None and claude_passrate > 0
+    has_qwen = qwen_passrate is not None
+    has_claude = claude_passrate is not None
 
     issues = check_passrate_thresholds(task_id, qw, cl, has_qwen, has_claude)
     return {

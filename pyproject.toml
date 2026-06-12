@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ctpipe"
+version = "0.1.0"
+description = "Coding Trajectory benchmark pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.28",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "python-dotenv>=1.0",
+    "filelock>=3.12",
+]
+
+[project.scripts]
+ctpipe = "ctpipe.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ctpipe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

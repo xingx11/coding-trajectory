@@ -32,36 +32,12 @@ from ctpipe.retry import (
     retry,
 )
 from ctpipe.state import PipelineState
+from conftest import build_config, make_task
 
 
 # =========================================================================
 # Helpers
 # =========================================================================
-
-
-def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
-    return BatchConfig(
-        delivery_date="20990101",
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-    )
-
-
-def _make_task(task_id: str = "CT-0001") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type="bug-fix",
-        domain="web_frontend",
-        language="ts",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-        bad_pattern="lazy_shortcut",
-    )
 
 
 MODELS = ["qwen", "claude"]
@@ -201,7 +177,7 @@ class FindFailedEntriesTest(unittest.TestCase):
         self, tmpdir: str, task_ids: list[str]
     ) -> tuple[PipelineState, list[TaskConfig]]:
         state = PipelineState(Path(tmpdir) / "state.json")
-        tasks = [_make_task(tid) for tid in task_ids]
+        tasks = [make_task(tid, bad_pattern="lazy_shortcut") for tid in task_ids]
         return state, tasks
 
     def test_finds_failed_model_specific_entries(self) -> None:
@@ -1158,14 +1134,14 @@ class RetryNothingToRetryTest(unittest.TestCase):
     """Test retry() when there are no failed entries."""
 
     def test_all_done_returns_true(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1187,7 +1163,7 @@ class RetryNothingToRetryTest(unittest.TestCase):
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([])
+                config = build_config([], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1201,7 +1177,7 @@ class RetryNothingToRetryTest(unittest.TestCase):
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([_make_task()])
+                config = build_config([make_task(bad_pattern="lazy_shortcut")], person_id="")
                 # Do NOT create delivery_dir
                 result = asyncio.run(retry(config))
                 self.assertFalse(result)
@@ -1211,14 +1187,14 @@ class RetryDryRunTest(unittest.TestCase):
     """Test retry() dry_run mode."""
 
     def test_dry_run_does_not_modify_state(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1248,14 +1224,14 @@ class RetryMaxRetriesExhaustedTest(unittest.TestCase):
     """Test retry() when max retries are exceeded."""
 
     def test_marks_permanently_failed_after_max_retries(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1282,14 +1258,14 @@ class RetrySuccessfulTest(unittest.TestCase):
     """Test retry() with successful re-execution."""
 
     def test_retry_succeeds_after_one_round(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1330,14 +1306,14 @@ class RetryStageCrashTest(unittest.TestCase):
     """Test retry() when a stage crashes entirely."""
 
     def test_stage_crash_marks_all_entries_failed(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1373,14 +1349,14 @@ class RetryCascadeTest(unittest.TestCase):
     """Test retry() cascade behavior."""
 
     def test_cascade_expands_downstream_stages(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1428,14 +1404,14 @@ class RetryMultipleRoundsTest(unittest.TestCase):
     """Test retry() with multiple rounds."""
 
     def test_stops_early_when_no_more_failures(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1476,14 +1452,14 @@ class RetryMultipleRoundsTest(unittest.TestCase):
 
     def test_mixed_retryable_and_exhausted(self) -> None:
         """One entry exhausted, one still retryable."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1532,14 +1508,14 @@ class RetryWithStageFilterTest(unittest.TestCase):
     """Test retry() with stage filter."""
 
     def test_only_retries_specified_stages(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1586,14 +1562,14 @@ class RetryIndividualEntryFailureTest(unittest.TestCase):
     """Test retry() when individual entries still fail after re-execution."""
 
     def test_individual_entry_still_failed_after_retry(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1635,14 +1611,14 @@ class RetryCustomModelsTest(unittest.TestCase):
     """Test retry() with custom model list."""
 
     def test_custom_models_list(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(
                 BatchConfig, "base_dir",
                 new_callable=PropertyMock, return_value=tmp,
             ):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 

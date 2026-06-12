@@ -18,31 +18,7 @@ from ctpipe.prepare import _create_submission_csv
 from ctpipe.state import PipelineState
 from ctpipe.trajectory import find_trajectory_for_run
 
-
-def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
-    return BatchConfig(
-        delivery_date="20990101",
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-    )
-
-
-def _make_task(task_id: str = "CT-0001") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type="bug-fix",
-        domain="web_frontend",
-        language="ts",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-        followups_qwen=["f1"],
-        followups_claude=["f1", "f2"],
-    )
+from conftest import build_config, make_task
 
 
 class PipelineOptimizationTests(unittest.TestCase):
@@ -76,7 +52,7 @@ class PipelineOptimizationTests(unittest.TestCase):
         self.assertEqual(len(sampled), 2)
 
     def test_prepare_submission_csv_copies_header_only(self) -> None:
-        config = _build_config()
+        config = build_config(person_id="")
         with tempfile.TemporaryDirectory() as tmpdir:
             csv_path = Path(tmpdir) / "submission.csv"
             _create_submission_csv(config, csv_path)
@@ -98,7 +74,7 @@ class PipelineOptimizationTests(unittest.TestCase):
             followups_qwen=["f1"],
             followups_claude=["f1", "f2"],
         )
-        config = _build_config()
+        config = build_config(person_id="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
@@ -198,7 +174,7 @@ class RunAllErrorsTest(unittest.TestCase):
     def test_all_turns_errored_marks_failed(self) -> None:
         from ctpipe.run import run_single
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             state = PipelineState(Path(tmpdir) / "state.json")
@@ -234,7 +210,7 @@ class RunAllErrorsTest(unittest.TestCase):
         """When some (but not all) turns fail, status should be 'partial'."""
         from ctpipe.run import run_single, TurnResult
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         call_count = 0
 
         async def fake_run_claude_p(prompt, env, cwd, model=None, resume_session=None, timeout=600):
@@ -276,11 +252,11 @@ class CollectPartialRunTest(unittest.TestCase):
         from ctpipe.collect import collect_single
         from ctpipe.trajectory import TrajectoryInfo
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 (delivery_dir / "trajectories" / "qwen").mkdir(parents=True, exist_ok=True)
 
@@ -303,11 +279,11 @@ class CollectPartialRunTest(unittest.TestCase):
     def test_failed_run_is_skipped_by_collect(self) -> None:
         from ctpipe.collect import collect_single
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -329,7 +305,7 @@ class ScoreExceptionWritesFailedTest(unittest.TestCase):
         import asyncio
         from ctpipe.score import score_all
 
-        config = _build_config([_make_task()])
+        config = build_config([make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])], person_id="")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
@@ -338,7 +314,7 @@ class ScoreExceptionWritesFailedTest(unittest.TestCase):
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 (delivery_dir / "metadata").mkdir(parents=True, exist_ok=True)
-                write_task_manifest(config.task_manifest_path, [_make_task()])
+                write_task_manifest(config.task_manifest_path, [make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])])
 
                 state = PipelineState(delivery_dir / "pipeline_state.json")
                 state.set("CT-0001", "collect", model="qwen", status="done",
@@ -558,11 +534,11 @@ class FinalizeTrajectoryIssueStatusTest(unittest.TestCase):
     def test_no_valid_content_marks_failed(self) -> None:
         from ctpipe.trajectory import TrajectoryInfo
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -594,11 +570,11 @@ class FinalizeTrajectoryIssueStatusTest(unittest.TestCase):
                 self.assertEqual(info.get("status"), "failed")
 
     def test_parse_error_marks_failed(self) -> None:
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -630,11 +606,11 @@ class ValidateNonDictJsonTest(unittest.TestCase):
     """validate must not crash when trajectory JSONL contains non-dict JSON values."""
 
     def test_validate_handles_array_json_lines(self) -> None:
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -664,11 +640,11 @@ class FinalizeSingleModelThresholdTest(unittest.TestCase):
         from ctpipe.finalize import finalize
         from ctpipe.toml_utils import Criterion
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -743,11 +719,11 @@ class ValidateBadTomlTest(unittest.TestCase):
     def test_bad_toml_recorded_as_issue(self) -> None:
         from ctpipe.validate import validate
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 write_task_manifest(config.task_manifest_path, [task])
@@ -782,7 +758,7 @@ class StatsTests(unittest.TestCase):
     def _setup_delivery(self, tmpdir: str, tasks: list[TaskConfig]) -> tuple[BatchConfig, PipelineState]:
         temp_base = Path(tmpdir)
         # We need to patch base_dir so delivery_dir resolves under tmpdir.
-        config = _build_config(tasks)
+        config = build_config(tasks, person_id="")
         delivery_dir = temp_base / f"delivery_{config.delivery_date}"
         delivery_dir.mkdir(parents=True, exist_ok=True)
         (delivery_dir / "metadata").mkdir(parents=True, exist_ok=True)
@@ -796,7 +772,7 @@ class StatsTests(unittest.TestCase):
         from io import StringIO
         from ctpipe.stats import show_stats
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, [task])
@@ -821,7 +797,7 @@ class StatsTests(unittest.TestCase):
         """When any stage has failures, show_stats returns False."""
         from ctpipe.stats import show_stats
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, [task])
@@ -840,7 +816,7 @@ class StatsTests(unittest.TestCase):
         """When tasks have empty (pending) status, show_stats returns False."""
         from ctpipe.stats import show_stats
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, [task])
@@ -858,7 +834,7 @@ class StatsTests(unittest.TestCase):
         from io import StringIO
         from ctpipe.stats import show_stats
 
-        task = _make_task()
+        task = make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, [task])
@@ -914,7 +890,7 @@ class StatsTests(unittest.TestCase):
         """Bottleneck should point to the stage with the most failures."""
         from ctpipe.stats import _collect_stage_counts, _find_bottleneck
 
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 6)]
+        tasks = [make_task(f"CT-{i:04d}", followups_qwen=["f1"], followups_claude=["f1", "f2"]) for i in range(1, 6)]
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, tasks)
@@ -954,7 +930,7 @@ class StatsTests(unittest.TestCase):
         """A stage with 0 failures but many pending should not be the bottleneck."""
         from ctpipe.stats import _collect_stage_counts, _find_bottleneck
 
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", followups_qwen=["f1"], followups_claude=["f1", "f2"]) for i in range(1, 4)]
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, tasks)
@@ -1057,16 +1033,21 @@ class StatsTests(unittest.TestCase):
         """show_stats should print a friendly message and return False when delivery dir is missing."""
         import sys
         from io import StringIO
+        from unittest.mock import patch
+        from ctpipe.config import BatchConfig
         from ctpipe.stats import show_stats
 
-        config = _build_config([_make_task()])
-        # Do NOT create the delivery directory.
+        config = build_config([make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])], person_id="")
 
         captured = StringIO()
         old_stdout = sys.stdout
         sys.stdout = captured
         try:
-            result = show_stats(config, models=["qwen", "claude"], fmt="table")
+            # Sandbox base_dir to a fresh tmp so delivery_dir is guaranteed absent
+            # (sibling tests share the same delivery_date and may create it in the repo).
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch.object(BatchConfig, "base_dir", property(lambda self: Path(tmpdir))):
+                    result = show_stats(config, models=["qwen", "claude"], fmt="table")
         finally:
             sys.stdout = old_stdout
 
@@ -1079,15 +1060,19 @@ class StatsTests(unittest.TestCase):
         """Missing delivery dir should produce valid JSON with an error field."""
         import sys
         from io import StringIO
+        from unittest.mock import patch
+        from ctpipe.config import BatchConfig
         from ctpipe.stats import show_stats
 
-        config = _build_config([_make_task()])
+        config = build_config([make_task(followups_qwen=["f1"], followups_claude=["f1", "f2"])], person_id="")
 
         captured = StringIO()
         old_stdout = sys.stdout
         sys.stdout = captured
         try:
-            result = show_stats(config, models=["qwen", "claude"], fmt="json")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch.object(BatchConfig, "base_dir", property(lambda self: Path(tmpdir))):
+                    result = show_stats(config, models=["qwen", "claude"], fmt="json")
         finally:
             sys.stdout = old_stdout
 
@@ -1115,11 +1100,11 @@ class StatsTests(unittest.TestCase):
         from io import StringIO
         from ctpipe.stats import show_stats
 
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 3)]
+        tasks = [make_task(f"CT-{i:04d}", followups_qwen=["f1"], followups_claude=["f1", "f2"]) for i in range(1, 3)]
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_base = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=temp_base):
-                config = _build_config(tasks)
+                config = build_config(tasks, person_id="")
                 delivery_dir = temp_base / f"delivery_{config.delivery_date}"
                 delivery_dir.mkdir(parents=True, exist_ok=True)
                 (delivery_dir / "metadata").mkdir(parents=True, exist_ok=True)
@@ -1152,7 +1137,7 @@ class StatsTests(unittest.TestCase):
         """Passrate min/max/mean should be computed from finalize state."""
         from ctpipe.stats import _collect_passrate_stats
 
-        tasks = [_make_task(f"CT-{i:04d}") for i in range(1, 4)]
+        tasks = [make_task(f"CT-{i:04d}", followups_qwen=["f1"], followups_claude=["f1", "f2"]) for i in range(1, 4)]
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_base.return_value = Path(tmpdir)
             config, state = self._setup_delivery(tmpdir, tasks)

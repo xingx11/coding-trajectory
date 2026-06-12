@@ -6,7 +6,9 @@ string templating since the structure is a list of [[criterion]] blocks.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +42,7 @@ def read_quality_toml(path: Path) -> list[Criterion]:
 
 
 def escape_toml_basic(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
 
 
 def escape_toml_multiline(s: str) -> str:
@@ -65,7 +67,23 @@ def write_quality_toml(path: Path, criteria: list[Criterion]) -> None:
             f'score = {c.score}\n'
             f'rationale = "{escape_toml_basic(c.rationale)}"\n'
         )
-    path.write_text("\n".join(parts), encoding="utf-8")
+    content = "\n".join(parts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    closed = False
+    try:
+        os.write(fd, content.encode("utf-8"))
+        os.close(fd)
+        closed = True
+        os.replace(tmp, path)
+    except BaseException:
+        if not closed:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def write_rubric_pair(rubrics_dir: Path, task_id: str, criteria: list[Criterion]) -> None:
@@ -93,7 +111,13 @@ def is_complete_rubric(criteria: list[Criterion]) -> bool:
 
     if not (MIN_CRITERIA_COUNT <= len(criteria) <= MAX_CRITERIA_COUNT):
         return False
-    return all(c.score >= 1 and c.rationale for c in criteria)
+    return all(
+        1 <= c.score <= 5
+        and c.points == 5
+        and c.type == "likert"
+        and c.rationale
+        for c in criteria
+    )
 
 
 def has_custom_descriptions(criteria: list[Criterion]) -> bool:
@@ -112,7 +136,7 @@ def has_score_tiers(description: str) -> bool:
     at least 5 characters of substantive definition before the next tier
     marker or end of string.
     """
-    tier_pattern = re.compile(r"(\d)\s*分\s*[：:]")
+    tier_pattern = re.compile(r"(?<!\d)([1-5])\s*分\s*[：:]")
     matches = list(tier_pattern.finditer(description))
     found_tiers = {int(m.group(1)) for m in matches}
     if found_tiers != {1, 2, 3, 4, 5}:

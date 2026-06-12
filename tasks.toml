@@ -18,24 +18,1927 @@
 # =============================================================================
 
 [batch]
-delivery_date = "20260609"
+delivery_date = "20260611"
 runs_root = "D:\\A3Code\\runs"
 max_parallel = 5
 person_id = "56"
 
 # =============================================================================
 # Tasks are appended below, either by `ctpipe gen` or manually.
-# Example format:
-#
-# [[task]]
-# id = "CT-0001"
-# project_path = "D:\\path\\to\\source\\project"
-# clone_method = "git"
-# task_type = "bug-fix"
-# domain = "web_frontend"
-# language = "ts"
-# prompt_qwen = """You are working in a local project directory. ..."""
-# followups_qwen = ["...", "..."]
-# prompt_claude = """You are working in a local project directory. ..."""
-# followups_claude = ["...", "...", "...", "...", "..."]
 # =============================================================================
+
+[[task]]
+id = "CT-0001"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\Folia"
+clone_method = "git"
+task_type = "feature"
+domain = "backend_service"
+language = "shell"
+task_title = "为管道添加 dry-run 全局模式与执行计划预览功能"
+task_description = """当前 ctpipe 的 dry-run 功能仅在 retry 和 gen 子命令中可用。请为整个管道（尤其是 all 子命令）添加一个全局 --dry-run 标志，使用户在执行 `python -m ctpipe --config tasks.toml all --dry-run` 时能预览完整的执行计划而不实际执行任何操作。具体要求：(1) 在 cli.py 的顶层 parser 中添加 --dry-run 参数，并将其传递给所有子命令；(2) 在 prepare.py 中，dry-run 模式下应列出将要克隆的项目及目标路径但不执行 git clone 或 shutil.copytree；(3) 在 run.py 中，dry-run 模式下应打印将要执行的 claude -p 命令及其环境变量摘要（隐藏 token 值）但不启动子进程；(4) 在 score.py 中，dry-run 模式下应显示将使用的评分维度来源（custom/fixed/free-selection）但不调用 AI；(5) 修改 _run_all_stages 使其在 dry-run 模式下调用各阶段的 dry-run 分支；(6) 编写 shell 脚本 scripts/preview_plan.sh，封装 dry-run 调用并将输出格式化为 JSON 执行计划。"""
+acceptance_criteria = [
+  "cli.py 中 --dry-run 参数在顶层 parser 定义，对 all/prepare/run/score/collect/finalize 子命令均生效",
+  "prepare 的 dry-run 输出包含每个 task_id 的克隆源路径和目标路径，但不创建任何目录或文件",
+  "run 的 dry-run 输出包含完整的 claude 命令行参数列表以及环境变量中 ANTHROPIC_BASE_URL 和 ANTHROPIC_MODEL 的值，但 ANTHROPIC_AUTH_TOKEN 必须显示为 '***REDACTED***'",
+  "score 的 dry-run 输出标明每个 task 的评分维度来源类型（custom_criteria/fixed_criteria/free_selection）",
+  "scripts/preview_plan.sh 脚本存在且可执行，接受 --config 参数，输出合法 JSON 格式的执行计划",
+  "现有测试 pytest tests/ 仍全部通过，不引入任何回归",
+]
+prompt_qwen = """帮我给 ctpipe 加个全局 --dry-run 模式，让 all 命令能预览完整执行计划但不实际执行任何操作"""
+followups_qwen = [
+  "在 prepare、run、score 各阶段实现 dry-run 分支：prepare 列出每个 task 的克隆源和目标路径，run 打印完整 claude 命令参数但不启动进程，score 显示每个 task 用的是 custom_criteria、fixed_criteria 还是 free_selection",
+  "run 的 dry-run 输出里，ANTHROPIC_AUTH_TOKEN 必须显示为 '***REDACTED***'，ANTHROPIC_BASE_URL 和 ANTHROPIC_MODEL 正常显示",
+  "写个 scripts/preview_plan.sh 脚本封装 dry-run 调用，接受 --config 参数，输出合法 JSON 格式的执行计划",
+  "跑一下 pytest tests/ 确保没有引入回归",
+]
+prompt_claude = """给管道加一个全局的 --dry-run 标志，all 子命令下可以预览执行计划而不真正跑"""
+followups_claude = [
+  "prepare 的 dry-run 要列出每个 task 的克隆源路径和目标路径但不建目录，run 要打印完整 claude 命令行和环境变量摘要但不启动子进程，score 要标注每个 task 的维度来源是 custom_criteria、fixed_criteria 还是 free_selection",
+  "注意 run 的 dry-run 输出里 ANTHROPIC_AUTH_TOKEN 要脱敏显示为 '***REDACTED***'，但 ANTHROPIC_BASE_URL 和 ANTHROPIC_MODEL 保留原值",
+  "加个 scripts/preview_plan.sh 脚本，接受 --config 参数，调用 dry-run 然后把输出格式化成合法 JSON",
+  "确保现有的 pytest tests/ 全部通过，没有回归",
+]
+
+[[task]]
+id = "CT-0002"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\Folia"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "backend_service"
+language = "shell"
+task_title = "解释 collect 阶段的轨迹抢救与来源验证机制"
+task_description = """ctpipe 的 collect 模块实现了一套健壮的轨迹收集机制，支持从中断的运行中抢救(salvage)部分轨迹数据，并通过多层验证确保轨迹来源的正确性。请阅读 collect.py、trajectory.py、project_hash.py 和 state.py，撰写一份中文技术文档，解释以下内容：(1) collect_single 中 normal/salvage/force 三种收集模式的触发条件和行为差异，特别是 _SALVAGEABLE_STATUSES 的定义及其与 run 阶段状态的映射关系；(2) 当 run 阶段未记录 start_time 或 session_id 时，_infer_start_time 和 _infer_session_id 的推断策略——为什么用 .claude/ 目录的最早 mtime 作为 start_time，为什么扫描 project_hash_dir 的 JSONL 文件来恢复 session_id；(3) 轨迹验证链路：provider 检测 → 行数阈值 → session_id 匹配这三层校验的设计目的和失败处理；(4) find_trajectory_for_run（trajectory.py）如何根据 start_time 和 session_id 在 ~/.claude/projects/ 下定位正确的 JSONL 文件。"""
+acceptance_criteria = [
+  "文档输出到 docs/analysis/collect_salvage_mechanism.md",
+  "用表格或决策树完整列出 collect_single 中 run_status 与 force/salvage 参数组合的所有分支路径及其最终 collect 状态（done/partial/skipped/failed）",
+  "解释 _infer_start_time 使用 .claude/ 目录最早 mtime 的原因（.claude/settings.local.json 在 prepare 阶段创建，其 mtime 接近运行启动时间）",
+  "解释 _infer_session_id 扫描 project_hash_dir 中 JSONL 前 30 行寻找 sessionId 字段的策略",
+  "说明 MIN_TRAJECTORY_LINES (10) 和 MIN_SALVAGE_LINES (3) 两个阈值的设计意图及它们在 salvage 模式下的差异化应用",
+  "解释 validate_session_id 对路径遍历字符的防御及其安全意义",
+]
+prompt_qwen = """帮我读一下 ctpipe 的 collect.py、trajectory.py、project_hash.py 和 state.py，写一份中文技术文档解释轨迹收集和抢救机制，输出到 docs/analysis/collect_salvage_mechanism.md"""
+followups_qwen = [
+  "用表格或决策树把 collect_single 里 run_status 跟 force/salvage 参数组合的所有分支路径都列出来，标清楚每条路径最终的 collect 状态是 done、partial、skipped 还是 failed",
+  "加上对 _infer_start_time 和 _infer_session_id 的详细解释，说明为什么用 .claude/ 目录最早 mtime 来推断启动时间、为什么扫描 JSONL 前 30 行来恢复 session_id，还有 MIN_TRAJECTORY_LINES(10) 和 MIN_SALVAGE_LINES(3) 这两个阈值在 salvage 模式下的差异化应用",
+  "补充三层验证链路的设计目的——provider 检测、行数阈值、session_id 匹配各自防的是什么问题，再解释一下 validate_session_id 对路径遍历的防御，以及 find_trajectory_for_run 怎么在 ~/.claude/projects/ 下根据 start_time 和 session_id 定位正确的 JSONL 文件",
+]
+prompt_claude = """帮我分析 ctpipe 里 collect 阶段的轨迹收集逻辑，读 collect.py、trajectory.py、project_hash.py、state.py 这几个文件，写个中文技术文档说明收集和抢救机制，放到 docs/analysis/collect_salvage_mechanism.md"""
+followups_claude = [
+  "把 collect_single 里 run_status 和 force/salvage 参数的所有组合用表格或决策树画出来，每条分支标注最终 collect 状态（done/partial/skipped/failed）",
+  "详细解释 _infer_start_time 为什么选 .claude/ 目录最早 mtime 作为近似启动时间，_infer_session_id 为什么只扫描 JSONL 前 30 行找 sessionId，还有 MIN_TRAJECTORY_LINES(10) 和 MIN_SALVAGE_LINES(3) 在 salvage 和普通模式下的差异",
+  "再补上验证链路的部分——provider 检测、行数阈值、session_id 匹配这三层校验分别防什么，validate_session_id 的路径遍历防御为什么重要，以及 find_trajectory_for_run 是怎么通过 project_hash_dir 和时间过滤定位目标 JSONL 的",
+]
+
+[[task]]
+id = "CT-0003"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\ng-admin"
+clone_method = "git"
+task_type = "feature"
+domain = "web_frontend"
+language = "js"
+task_title = "为 Datagrid 列表视图实现行内编辑功能"
+task_description = """当前 ng-admin 的列表视图（ListView）仅支持只读展示，用户必须跳转到编辑页面才能修改数据。需要为 maDatagrid 指令新增行内编辑（inline-edit）模式：用户双击某行时，该行的可编辑字段切换为对应的表单控件（如 input、select），支持就地修改并通过 REST API 提交保存。需要在 Field 配置中增加 inlineEditable() 方法控制哪些字段允许行内编辑，在 ListController 中增加保存逻辑调用 WriteQueries，并在 maDatagrid 模板中处理编辑态与展示态的切换。"""
+acceptance_criteria = [
+  "Field 配置对象新增 inlineEditable() 方法，默认为 false，可在 admin 配置中对指定字段开启",
+  "maDatagrid 指令支持双击某行进入编辑态，该行可编辑字段渲染为对应的表单控件（text/number/choice 等）",
+  "编辑态下按 Enter 或点击保存按钮调用 WriteQueries 发送 PUT 请求，成功后切回展示态并更新行数据",
+  "按 Escape 或点击取消按钮放弃修改，恢复原始数据",
+  "同一时刻只允许一行处于编辑态，切换行时自动取消前一行的编辑",
+  "未配置 inlineEditable 的字段在编辑态下仍以只读文本展示",
+]
+prompt_qwen = """帮我给 ng-admin 的列表视图加上行内编辑功能，双击某行就能直接在表格里修改数据然后保存"""
+followups_qwen = [
+  "在 Field 配置里加一个 inlineEditable() 方法来控制哪些字段允许行内编辑，默认关闭。编辑态下根据字段类型渲染对应的表单控件（text、number、choice 这些），没开启 inlineEditable 的字段编辑态下还是只读文本",
+  "处理边界情况：同一时刻只能有一行处于编辑态，双击新行时自动取消前一行的编辑；按 Escape 或点取消按钮要恢复原始数据；按 Enter 或点保存按钮通过 WriteQueries 发 PUT 请求，成功后刷新行数据切回展示态",
+  "给行内编辑写单元测试，覆盖 Field.inlineEditable 配置、编辑态切换、保存和取消操作、以及同时只能编辑一行的逻辑",
+]
+prompt_claude = """给 ng-admin 的 datagrid 列表加个行内编辑的功能，用户双击一行就能就地编辑字段并提交保存"""
+followups_claude = [
+  "Field 配置对象需要新增 inlineEditable() 方法，默认 false，在 admin 配置里可以对指定字段开启。编辑态时可编辑字段要根据类型（text/number/choice 等）渲染成对应表单控件，未开启的字段保持只读显示",
+  "边界情况要处理好：只允许同时编辑一行，切到别的行时自动取消之前的编辑；Escape 和取消按钮放弃修改并恢复原值；Enter 和保存按钮调用 WriteQueries 发送 PUT 请求保存，成功后更新数据回到展示态",
+  "写单元测试覆盖核心逻辑：Field.inlineEditable 的配置行为、双击进入编辑态和退出、保存与取消操作、以及单行编辑互斥的约束",
+]
+
+[[task]]
+id = "CT-0004"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\claude-octopus"
+clone_method = "git"
+task_type = "build-release-config"
+domain = "devtools_test"
+language = "shell"
+task_title = "为 ctpipe 配置完整的 CI 测试与发布工作流"
+task_description = """当前 ctpipe 项目有 pyproject.toml 和 tests/ 目录，但缺少 CI/CD 配置和发布脚本。请为该项目配置完整的构建、测试和发布流程：
+
+1. 编写 `scripts/test.sh`：执行 pytest 测试套件，支持 `--coverage` 标志生成覆盖率报告，设置正确的 PYTHONPATH 和测试超时参数，并在测试失败时返回非零退出码。
+2. 编写 `scripts/build.sh`：使用 `python -m build` 构建 sdist 和 wheel 包，在构建前检查 pyproject.toml 中的版本号格式，构建后使用 `twine check` 验证产物完整性。
+3. 编写 `scripts/release.sh`：接受 `--dry-run` 参数，检查 git 工作树是否干净、当前分支是否为 main、版本 tag 是否已存在，满足条件后执行构建并创建 git tag。
+4. 完善 pyproject.toml：补充 classifiers、project.urls、license 等元数据字段，添加 `[project.optional-dependencies]` 中的 build 依赖组（包含 build、twine）。
+
+所有 shell 脚本必须兼容 Git Bash on Windows（参考 ctpipe/config.py 中的 `_find_git_bash` 逻辑确保路径处理正确）。"""
+acceptance_criteria = [
+  "scripts/test.sh 可在 Git Bash 和 Linux 下执行，运行 pytest tests/ 并在全部通过时返回退出码 0",
+  "scripts/build.sh 能正确构建 sdist 和 wheel 到 dist/ 目录，并通过 twine check 验证",
+  "scripts/release.sh 支持 --dry-run 模式，检查 git 状态、分支和 tag 冲突，dry-run 模式下仅打印将要执行的操作",
+  "pyproject.toml 中新增 classifiers（至少包含 Python 版本和 License 分类器）、project.urls（至少包含 Homepage 和 Repository）以及 build 可选依赖组",
+  "所有脚本使用 set -euo pipefail 开头，路径处理兼容 Windows 和 Unix（不硬编码 / 或 \\\\）",
+]
+prompt_qwen = """帮 ctpipe 项目在 scripts/ 下加一套测试、构建和发布的 shell 脚本"""
+followups_qwen = [
+  "先写 scripts/test.sh，跑 pytest tests/，支持 --coverage 参数生成覆盖率报告，设好 PYTHONPATH 和超时，测试失败时返回非零退出码",
+  "再写 scripts/build.sh，用 python -m build 构建 sdist 和 wheel，构建前校验 pyproject.toml 里的版本号格式，构建后用 twine check 验证产物",
+  "再写 scripts/release.sh，支持 --dry-run 参数，发布前检查 git 工作树是否干净、当前分支是不是 main、版本 tag 有没有冲突，都通过了再构建并打 tag",
+  "把 pyproject.toml 的元数据补全，加上 classifiers、project.urls 和 build 可选依赖组。所有脚本开头加 set -euo pipefail，路径处理要兼容 Git Bash on Windows，别硬编码斜杠",
+]
+prompt_claude = """这个项目缺 CI 自动化脚本，帮我在 scripts/ 下写测试、构建和发布流程"""
+followups_claude = [
+  "先搞 scripts/test.sh，要能执行 pytest tests/ 并支持传 --coverage 来生成覆盖率，注意设置 PYTHONPATH 和测试超时，失败要返回非零退出码",
+  "接着写 scripts/build.sh，用 python -m build 打包 sdist 和 wheel，要先检查版本号格式是否合法，构建完再用 twine check 验证",
+  "然后写 scripts/release.sh，加 --dry-run 模式，要检查 git 工作树干净、在 main 分支、tag 不重复，检查通过后执行构建和创建 git tag",
+  "顺便完善 pyproject.toml，补上 classifiers、project.urls 和 build 可选依赖组。另外确保三个脚本都用 set -euo pipefail，路径处理兼容 Windows 的 Git Bash",
+]
+
+[[task]]
+id = "CT-0005"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\Folia"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "backend_service"
+language = "shell"
+task_title = "解释 retry 模块的级联重试与状态恢复机制"
+task_description = """ctpipe 管道中的 retry 子命令实现了一套复杂的级联重试机制：当某个阶段失败时，不仅需要重试该阶段，还需要级联重置并重新执行所有下游阶段。请深入阅读 retry.py、state.py、config.py 以及各阶段模块（run.py、collect.py、score.py），用一份结构化的中文 Markdown 文档解释以下内容：(1) _find_failed_entries 如何区分 model-specific 阶段和 model-agnostic 阶段来扫描失败项；(2) _expand_cascade 的级联展开逻辑，以及当 model-agnostic 的 prepare 阶段失败时如何向所有模型的下游阶段扩散；(3) retry 函数中 saved_counts → reset → increment 的三步状态管理为何必须按此顺序执行，如果顺序颠倒会产生什么 bug；(4) permanently_failed 标记的触发条件和作用。文档应包含至少一个完整的级联重试流程示意（如 prepare 失败后触发 run/collect/score/finalize 的完整链路），并标注每一步涉及的源文件和函数。"""
+acceptance_criteria = [
+  "文档以 Markdown 格式输出到 docs/analysis/ 目录，文件名为 retry_cascade_mechanism.md",
+  "准确解释 MODEL_SPECIFIC_STAGES 与 _MODEL_AGNOSTIC_STAGES 的划分依据及其对 _find_failed_entries 扫描逻辑的影响",
+  "包含 _expand_cascade 从 prepare 失败到 run/collect/score/finalize 全链路的图示或步骤列表，标注每步涉及的模型（qwen/claude）",
+  "明确说明 saved_counts 在 reset 前读取的原因：reset 会删除 state entry 导致 retry_count 丢失，若顺序错误 retry_count 将永远为 0",
+  "解释 permanently_failed 状态如何阻止后续 retry 轮次再次处理已耗尽重试次数的条目",
+  "文档中每个关键点引用具体的源文件路径和函数名",
+]
+prompt_qwen = """帮我分析一下 ctpipe/retry.py 里面的级联重试机制，写个中文 Markdown 文档解释清楚它的工作原理，输出到 docs/analysis/retry_cascade_mechanism.md"""
+followups_qwen = [
+  "重点讲一下 _find_failed_entries 里面是怎么区分 model-specific 阶段和 model-agnostic 阶段的，扫描逻辑有什么不同，结合 config.py 里 MODEL_SPECIFIC_STAGES 和 retry.py 里 _MODEL_AGNOSTIC_STAGES 的定义来说明",
+  "再补充 _expand_cascade 的级联展开逻辑，特别是 prepare 这种 model-agnostic 阶段失败时，是怎么向所有模型的下游 run/collect/score/finalize 扩散的，画一个完整的链路步骤列表",
+  "文档里加上对 retry 函数中 saved_counts → reset → increment 这三步状态管理顺序的分析，解释清楚为什么必须在 reset 之前读取 saved_counts，如果顺序反了会有什么 bug，结合 state.py 的 reset 方法来说明",
+  "最后补充 permanently_failed 标记的触发条件和作用，说明它怎么阻止后续轮次重复处理，然后给一个端到端的完整重试流程示例，每一步标注涉及的源文件和函数名",
+]
+prompt_claude = """帮我把 ctpipe/retry.py 的级联重试和状态恢复逻辑整理成一份中文 Markdown 分析文档，放到 docs/analysis/retry_cascade_mechanism.md"""
+followups_claude = [
+  "详细解释 _find_failed_entries 对 model-specific 阶段（run/collect/score）和 model-agnostic 阶段（prepare/finalize）的扫描逻辑差异，引用 config.py 的 MODEL_SPECIFIC_STAGES 和 retry.py 的 _MODEL_AGNOSTIC_STAGES",
+  "展开讲 _expand_cascade 的级联逻辑，重点分析 prepare 失败时如何通过 _DOWNSTREAM 向 qwen 和 claude 两个模型的所有下游阶段扩散，用步骤列表或图示展示完整链路",
+  "分析 retry 函数里 saved_counts → reset → increment 三步的执行顺序为什么不能变，结合 state.py 中 reset 方法会删除 entry 导致 retry_count 丢失这个细节来解释顺序颠倒会产生的 bug",
+  "补上 permanently_failed 的触发机制和防重复处理的作用，再写一个从 prepare 失败触发到最终标记的端到端流程示例，每步注明对应的源文件路径和函数名",
+]
+
+[[task]]
+id = "CT-0006"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\Folia"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "backend_service"
+language = "shell"
+task_title = "解释评分系统中维度定制化与 passrate 双向约束的协作机制"
+task_description = """ctpipe 的评分系统在 score.py 和 rescore.py 之间实现了一套两轮评分协议，并通过 passrate 阈值实现双向质量控制。请阅读 score.py、rescore.py、toml_utils.py 和 config.py，撰写一份详细的中文技术文档解释以下机制：(1) score_all 中 qwen-first 评分策略的设计意图——为什么先对 qwen 打分，然后强制 claude 使用相同维度？这如何保证公平性？(2) _auto_customize_criteria 如何在首次评分时自动触发维度定制化，以及它与 rescore.py 的 build_dimension_prompt 之间的复用关系；(3) passrate_hint 作为软约束如何注入评分 prompt，以及 check_passrate_thresholds 中四条阈值规则（qwen < 0.7、claude > 0.7、claude > qwen、相对增益 > 25%）的业务含义；(4) auto_rescore 触发链路：score_all 完成后如何检测不合格任务并自动调用 rescore_all 进行二次评分。"""
+acceptance_criteria = [
+  "文档输出到 docs/analysis/scoring_mechanism.md，包含评分流程的完整时序图或流程图",
+  "准确解释 score_task_pair 中 qwen → claude 的评分顺序及维度一致性保障逻辑（包括 selected_names 传递和 qwen_full_crit 回退路径）",
+  "说明 _auto_customize_criteria 如何调用 rescore.py 的 build_dimension_prompt 和 parse_dimension_output，以及调用失败时的 fallback 行为（回退到 free selection）",
+  "详细解释 check_passrate_thresholds 的四条规则及其数学公式，包括 qwen_pr=0 时的特殊处理",
+  "解释 auto_rescore 从检测失败到调用 rescore_all 的完整调用链，包括 state 的 reload 时机",
+  "文档中所有关键函数引用包含源文件路径和行号范围",
+]
+prompt_qwen = """帮我梳理一下这个项目的评分系统是怎么工作的，把 score 和 rescore 两个模块的协作机制写成一份技术分析文档，放到 docs/analysis/scoring_mechanism.md"""
+followups_qwen = [
+  "重点说清楚 score_task_pair 里为什么要先给 qwen 打分再给 claude 打分，维度一致性是怎么保证的，selected_names 和 qwen_full_crit 这两条路径分别什么时候走",
+  "再把维度定制化那块补充一下，_auto_customize_criteria 是怎么复用 rescore.py 里的 build_dimension_prompt 和 parse_dimension_output 的，调用失败时怎么回退的",
+  "把 passrate 相关的机制都补上：passrate_hint 怎么注入 prompt 的、check_passrate_thresholds 四条阈值规则的具体公式和业务含义（包括 qwen_pr=0 的特殊处理），还有 auto_rescore 从检测失败到调用 rescore_all 的完整链路，最后加一个评分流程的时序图",
+]
+prompt_claude = """帮我分析这个项目的评分系统工作机制，重点看 score 和 rescore 模块之间怎么配合的，写一份技术文档输出到 docs/analysis/scoring_mechanism.md"""
+followups_claude = [
+  "重点解释 score_task_pair 中 qwen → claude 的评分顺序设计意图，维度一致性怎么保障的，selected_names 传递和 qwen_full_crit 回退这两条路径各自的触发条件",
+  "补充维度定制化部分：_auto_customize_criteria 怎么调用 rescore.py 的 build_dimension_prompt 和 parse_dimension_output 来生成定制维度的，失败时的 fallback 行为是什么",
+  "把 passrate 约束机制完整写出来：passrate_hint 作为软约束怎么注入评分 prompt、check_passrate_thresholds 的四条规则各自的数学公式和业务含义（含 qwen_pr=0 特殊分支），以及 auto_rescore 从阈值检测到触发 rescore_all 的调用链，文档末尾加一个完整的评分时序图",
+]
+
+[[task]]
+id = "CT-0007"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\ng-admin"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "web_frontend"
+language = "js"
+task_title = "修复 ReferenceMany 字段在快速切换实体时选项列表残留导致数据错乱"
+task_description = """在编辑视图（EditView）中，当页面包含 ReferenceMany 类型字段时，从一个实体快速切换到另一个实体（如通过侧边栏或浏览器前进/后退），ReferenceRefresher 中上一次的异步请求尚未完成，其回调仍会更新当前 scope 的 choices 列表，导致选项列表混入前一个实体关联的数据。极端情况下，保存时会将错误的关联 ID 提交到后端。问题根因在于 ReferenceRefresher 没有取消已过期的 $http promise，且 FormController 在 $routeChangeStart 时未清理引用字段状态。"""
+acceptance_criteria = [
+  "ReferenceRefresher 在发起新请求前取消上一次未完成的 $http promise（使用 $q.resolve 或 timeout.cancel）",
+  "FormController 在 $routeChangeStart 事件中清空所有 reference 类型字段的 choices 和已选值",
+  "快速在两个实体编辑页之间切换时，ReferenceMany 的下拉选项始终显示当前实体的正确关联数据",
+  "保存操作提交的关联 ID 列表与界面显示完全一致，不包含前一实体的残留数据",
+  "正常速度切换实体时 ReferenceMany 字段功能不受影响，选项加载和回显正常",
+]
+prompt_qwen = """编辑页面的 ReferenceMany 字段有个 bug，快速切换不同实体时下拉选项会残留上一个实体的关联数据，帮我修一下"""
+followups_qwen = [
+  "问题根因是 ReferenceRefresher 的 refresh 方法没有取消上一次未完成的异步请求，过期的回调还是会更新 choices，把这个取消逻辑加上",
+  "FormController 在 scope 销毁的时候也需要清理 reference 类型字段的 choices 和已选值，还有 maReferenceManyField 指令里也要处理 scope $destroy 时取消还在跑的请求",
+  "确认一下正常速度切换实体的时候功能不受影响，选项加载和回显都正常，保存提交的关联 ID 也要和界面显示一致",
+  "给 ReferenceRefresher 和 maReferenceManyField 补上单元测试，重点覆盖连续快速调用 refresh 时只有最后一次结果生效的场景",
+]
+prompt_claude = """ReferenceMany 字段在快速切换实体编辑页时选项列表会混入前一个实体的数据，需要修复这个竞态问题"""
+followups_claude = [
+  "核心问题在 ReferenceRefresher 的 refresh 方法里，每次发起新请求前要把上一次还没完成的 promise 作废掉，避免过期回调污染当前 choices",
+  "directive 那边也要处理，maReferenceManyField 在 scope 销毁时要取消进行中的请求，FormController destroy 的时候也清理一下 reference 字段的残留状态",
+  "验证下正常使用场景没被影响——普通速度切换实体时选项加载正常、回显正确，保存时提交的关联 ID 和页面展示一致",
+  "给这次修复写单元测试，主要测 ReferenceRefresher 连续调用时旧请求的结果不会覆盖新的，以及 scope 销毁后回调不再执行",
+]
+
+[[task]]
+id = "CT-0008"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\ng-admin"
+clone_method = "git"
+task_type = "documentation"
+domain = "web_frontend"
+language = "js"
+task_title = "编写自定义字段类型（Custom Field Type）扩展开发指南与完整示例"
+task_description = """ng-admin 支持通过自定义模板和字段类型扩展表单和列表的展示组件，但现有文档仅有零散的 API 描述，缺乏从零创建自定义字段的完整开发指南。需要在 doc/ 目录下编写一份结构化的开发者文档，覆盖自定义字段的完整生命周期：从 Field 类型注册、表单控件模板编写、列展示模板编写，到与 REST API 数据转换的集成。文档需包含一个完整的「颜色选择器（Color Picker）」自定义字段示例，展示如何在列表视图显示色块、在编辑表单中渲染拾色器控件、以及处理数据序列化。"""
+acceptance_criteria = [
+  "在 doc/ 下新建 Custom-types.md，包含概述、前置知识、分步教程、完整示例代码、常见问题五个章节",
+  "分步教程清晰说明自定义字段的 4 个关键步骤：注册 Field 类型、编写 form 模板、编写 column 模板、配置数据转换（transform/map）",
+  "颜色选择器示例代码完整可运行：包含自定义指令 JS 文件、HTML 模板、CSS 样式、以及在 admin app 配置中的使用代码",
+  "文档中包含架构图说明 Field → maField 指令 → 模板解析 → REST 数据流的完整链路，帮助开发者理解扩展点",
+  "文档交叉引用已有的 Field API（type, template, transform, map 方法），并链接到相关源码文件",
+  "文档通过 Markdown 语法检查，格式规范，代码块标注正确的语言类型（js/html/css）",
+]
+prompt_qwen = """doc/Custom-types.md 现有的自定义字段类型文档太散了，帮我重写成一份结构化的完整开发指南"""
+followups_qwen = [
+  "文档分成概述、前置知识、分步教程、完整示例、常见问题五个章节，分步教程里要讲清楚注册 Field 类型、写 FieldView 的 form 模板、写 column 模板、配置 transform/map 数据转换这四个步骤",
+  "加一个颜色选择器（Color Picker）的完整示例，要包含自定义指令 JS、HTML 模板和 CSS 样式，列表视图里显示色块，编辑表单里渲染拾色器控件，处理好十六进制颜色值的序列化",
+  "加一个文字架构图说明 Field → maField/maColumn 指令 → FieldViewConfiguration 模板解析 → REST 数据流的完整链路，交叉引用 Configuration-reference.md 里的 Field API，FAQ 覆盖几个常见踩坑点，代码块都标上正确的语言类型",
+]
+prompt_claude = """帮我把 doc/Custom-types.md 重写一下，整理成一份结构化的自定义字段类型扩展开发指南"""
+followups_claude = [
+  "把内容重新组织成五个章节：概述、前置知识、分步教程、完整示例、常见问题。分步教程覆盖四个关键步骤：注册 Field 类型、编写 FieldView 表单模板、编写列展示模板、配置 transform/map 数据转换",
+  "写一个颜色选择器自定义字段的完整示例，包括指令 JS 文件、HTML 模板、CSS 样式，列表视图显示颜色色块，编辑表单渲染颜色选择控件，十六进制颜色值的序列化处理也要体现",
+  "画一个文字架构图展示 Field 类 → maField/maColumn 指令 → FieldViewConfiguration 模板解析 → REST API 数据流的链路，加上对 Configuration-reference.md 中 Field API 的交叉引用，FAQ 章节收集常见问题，所有代码块标注语言高亮",
+]
+
+[[task]]
+id = "CT-0009"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\Folia"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "backend_service"
+language = "shell"
+task_title = "解释 run 模块的安全沙箱、环境隔离与多轮对话会话管理机制"
+task_description = """ctpipe 的 run 模块在执行 claude -p 子进程时实现了多层安全和隔离机制。请阅读 run.py、config.py 和 prepare.py，撰写一份中文技术文档，解释以下内容：(1) _sanitize_run_dir 的安全清理逻辑——为什么要删除克隆仓库中的 .claude/ 目录和 CLAUDE.md 文件，这与 --dangerously-skip-permissions 标志的安全风险有什么关系；(2) build_claude_env 和 build_validated_env 的环境变量隔离策略——_SAFE_ENV_PREFIXES 白名单的设计原则，以及为什么要设置 NO_PROXY 来包含 API host；(3) run_single 中的多轮对话管理：initial prompt → session_id 提取 → --resume 跟进的完整生命周期，包括超时后从磁盘 JSONL 恢复 session_id 的 fallback 机制；(4) 并发控制：run_all 中 Semaphore 如何控制并行度，以及 gather 中异常隔离如何保证单个任务失败不阻塞其他任务。"""
+acceptance_criteria = [
+  "文档输出到 docs/analysis/run_security_and_session.md",
+  "解释 _sanitize_run_dir 清理 .claude/、CLAUDE.md、claude.md、.claudeignore 的安全原因：这些文件可能包含恶意的 permissions 配置或指令注入，在 --dangerously-skip-permissions 模式下会被自动执行",
+  "用表格列出 _SAFE_ENV_PREFIXES 中各前缀的用途分类（系统路径、代理配置、Git 配置、Claude Code 配置等），并说明为何不直接传递全部父进程环境变量",
+  "解释 NO_PROXY 设置 API host 的原因：避免 API 请求经过 HTTP 代理导致认证失败或延迟",
+  "包含 run_single 从第一轮 prompt 到最后一轮 followup 的完整会话状态机图，标注 session_id 获取的主路径和 fallback 路径",
+  "解释 asyncio.Semaphore(max_parallel * 2) 中乘以 2 的原因（每个 task 同时运行 qwen 和 claude 两个模型）以及 gather + return_exceptions=True 的异常隔离效果",
+]
+prompt_qwen = """帮我给 run 模块写一份安全机制和会话管理的技术分析文档，输出到 docs/analysis/run_security_and_session.md"""
+followups_qwen = [
+  "重点分析 _sanitize_run_dir 为什么要删 .claude/ 目录和 CLAUDE.md 这些文件，跟 --dangerously-skip-permissions 的安全风险是什么关系，把 build_claude_env 的环境变量白名单设计也一起写进去",
+  "画一个 run_single 的完整多轮对话状态机图，从第一轮 prompt 到最后一轮 followup，标注 session_id 获取的主路径和超时后从磁盘 JSONL 恢复的 fallback 路径",
+  "分析 run_all 里 Semaphore 为什么乘以 2，gather 加 return_exceptions=True 怎么做到单任务失败不阻塞其他任务的",
+  "用表格把 _SAFE_ENV_PREFIXES 里各前缀按用途分类整理一下（系统路径、代理、Git、Claude Code 等），再解释 NO_PROXY 为什么要加上 API host",
+]
+prompt_claude = """帮我针对 run 模块的安全沙箱、环境隔离和多轮会话管理写一份中文技术分析文档，放到 docs/analysis/run_security_and_session.md"""
+followups_claude = [
+  "详细解释 _sanitize_run_dir 清理 .claude/、CLAUDE.md、claude.md、.claudeignore 的安全动机，说清楚这些文件在 --dangerously-skip-permissions 模式下的风险，顺便把 build_claude_env 环境变量白名单的设计原则也分析了",
+  "补充 run_single 从初始 prompt 到所有 followup 完成的完整会话生命周期图，要标出 session_id 解析的正常路径和通过 find_trajectory_for_run 从磁盘恢复的 fallback 路径",
+  "解释 run_all 中 asyncio.Semaphore(max_parallel * 2) 乘 2 的原因，以及 gather 配合 return_exceptions=True 如何实现异常隔离保证单个任务失败不影响整体",
+  "把 _SAFE_ENV_PREFIXES 的各前缀用表格按功能分类（系统路径、代理配置、Git、Claude Code 配置等），然后说明 NO_PROXY 设置 API host 是为了避免什么问题",
+]
+
+[[task]]
+id = "CT-0010"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\pkgroll"
+clone_method = "git"
+task_type = "feature"
+domain = "devtools_test"
+language = "ts"
+task_title = "为 pkgroll CLI 添加 --dry-run 预览模式"
+task_description = """为 pkgroll CLI 添加 `--dry-run` 标志，使用户可以在不实际执行 Rollup 构建和写入文件的情况下，预览将要生成的所有输出文件列表。预览信息应包含：每个输出文件的路径、格式（ESM/CJS/types）、对应的源文件路径，以及 src:dist 映射关系。该功能需要复用现有的 `getBuildEntryPoints` 和 `getRollupConfigs` 逻辑来解析入口点，但跳过实际的 Rollup build/write 阶段。输出格式应为结构化的表格形式，便于用户快速确认配置是否正确。"""
+acceptance_criteria = [
+  "在 src/cli.ts 的 flags 配置中添加 --dry-run（别名 -n）布尔标志，默认为 false",
+  "当 --dry-run 启用时，程序解析所有入口点并输出每个输出文件的路径、格式（module/commonjs/types）及其源文件路径到 stdout",
+  "当 --dry-run 启用时，不创建 dist 目录也不写入任何文件",
+  "在 tests/specs/builds/ 下新建 dry-run.ts 测试文件，包含至少 3 个测试用例：单入口点预览、多格式导出预览、以及验证 --dry-run 不会产生任何文件输出",
+  "--dry-run 模式与 --watch 标志互斥，同时使用时应给出明确错误提示",
+]
+prompt_qwen = """帮我给 pkgroll 加个 --dry-run 模式，能预览会生成哪些输出文件但不真的构建"""
+followups_qwen = [
+  "输出用表格形式展示，每行包含输出文件路径、格式类型（module/commonjs/types）和对应的源文件路径，复用现有的 getBuildEntryPoints 和 getRollupConfigs 来解析入口点，不要走 rollup 的 build/write 流程",
+  "处理一下 --dry-run 和 --watch 同时传入的情况，两个互斥，同时用的时候给个明确的错误提示然后退出",
+  "在 tests/specs/builds/ 下加个 dry-run.ts 测试文件，至少覆盖三个场景：单入口点预览、多格式导出预览、以及确认 --dry-run 不会产生任何实际文件",
+]
+prompt_claude = """pkgroll CLI 需要一个 --dry-run 功能，让用户预览构建产物列表而不实际执行打包"""
+followups_claude = [
+  "预览信息要结构化表格输出，显示每个产物的输出路径、格式（module/commonjs/types）和源文件映射关系，直接复用 getBuildEntryPoints 和 getRollupConfigs 解析，跳过实际的 rollup build 和 write",
+  "--dry-run 跟 --watch 应该互斥，两个一起传的时候要报错并退出进程",
+  "写个测试文件放 tests/specs/builds/dry-run.ts，测三个用例：单入口预览输出、多格式导出预览、以及验证 dry-run 模式不会写入任何文件到 dist",
+]
+
+[[task]]
+id = "CT-0011"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\pkgroll"
+clone_method = "git"
+task_type = "testing-quality"
+domain = "devtools_test"
+language = "ts"
+task_title = "为核心工具函数补充单元测试以提高测试覆盖率"
+task_description = """当前项目的测试全部是通过运行完整 pkgroll CLI 的集成测试，缺乏对核心工具函数的单元测试覆盖。需要为 `import-specifier.ts` 中的 `parseSpecifier`、`isBareSpecifier`、`isFromNodeModules` 三个函数以及 `get-source-path.ts` 中的源文件扩展名匹配逻辑创建独立的单元测试文件。单元测试应覆盖正常路径、边界情况（如 scoped 包名 `@org/pkg/sub`、Windows 绝对路径、空字符串输入）和异常场景，并确保测试与现有 manten 测试框架保持一致风格。需要在 `tests/specs/` 下新建 `unit/` 目录存放单元测试。"""
+acceptance_criteria = [
+  "新建 tests/specs/unit/import-specifier.ts 文件，包含至少 10 个测试用例覆盖 parseSpecifier（普通包、scoped 包、含子路径、不含子路径）、isBareSpecifier（相对路径、绝对路径、#imports、裸标识符）、isFromNodeModules（node_modules 内外路径）",
+  "新建 tests/specs/unit/get-source-path.ts 文件，包含至少 6 个测试用例验证 extensionMap 中不同输出扩展名到源文件扩展名的匹配优先级，以及源文件不存在时的错误返回格式",
+  "所有单元测试使用 manten 的 describe/test/expect API 编写，并在 tests/index.ts 中正确注册",
+  "所有新增测试执行通过，无运行时错误",
+]
+prompt_qwen = """这个项目的测试全是跑 CLI 的集成测试，帮我给 src/utils 下面的核心工具函数补上单元测试"""
+followups_qwen = [
+  "在 tests/specs 下建一个 unit 目录，先给 import-specifier.ts 的 parseSpecifier、isBareSpecifier、isFromNodeModules 三个函数写测试，parseSpecifier 要覆盖普通包、scoped 包 @org/pkg、带子路径和不带子路径的情况，isBareSpecifier 要测相对路径、绝对路径、#imports 和裸标识符，isFromNodeModules 要测 node_modules 内外的路径，空字符串这些边界也别漏了",
+  "再给 get-source-path.ts 的 getSourcePath 写测试，用 fs-fixture 创建临时文件，验证 extensionMap 里不同输出扩展名（.js、.mjs、.cjs、.d.ts）能按优先级找到正确的源文件，以及输出扩展名不支持和源文件不存在时返回的错误格式对不对",
+  "normalize-path.ts 的 slash 和 normalizePath 也加上测试，覆盖 Windows 反斜杠转换、相对路径自动补 ./、目录路径补尾部 / 这些场景",
+  "把这些新的单元测试都注册到 tests/index.ts 里面，用 manten 的 describe/test/expect 风格跟现有测试保持一致，跑一下确认全部通过",
+]
+prompt_claude = """项目目前只有集成测试，缺少对 src/utils 里工具函数的单元测试覆盖，帮我补一下"""
+followups_claude = [
+  "先在 tests/specs/ 下新建 unit/ 目录，给 import-specifier.ts 写单元测试，parseSpecifier 覆盖普通包名、scoped 包名 @org/pkg/sub、有无子路径的各种组合，isBareSpecifier 覆盖相对路径、绝对路径、#imports、裸标识符，isFromNodeModules 覆盖 node_modules 内外路径，还有空字符串之类的边界输入",
+  "接着给 get-source-path.ts 的 getSourcePath 写测试，用 fs-fixture 模拟文件系统，测试不同的 distExtension（.js、.mjs、.cjs、.d.ts 等）能否按 extensionMap 的优先级正确匹配到源文件，再测一下不支持的扩展名和源文件找不到时的错误返回格式",
+  "normalize-path.ts 的 slash 和 normalizePath 也补上测试，测 Windows 路径反斜杠转换、非相对路径自动加 ./、isDirectory 参数加尾部斜杠这些情况",
+  "新写的单元测试全部注册到 tests/index.ts 中，保持 manten 的 describe/test/expect 写法风格，确认所有测试能正常执行通过",
+]
+
+[[task]]
+id = "CT-0012"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\ng-admin"
+clone_method = "git"
+task_type = "testing-quality"
+domain = "web_frontend"
+language = "js"
+task_title = "为批量删除功能编写覆盖完整交互流程的单元测试与集成测试"
+task_description = """当前 ng-admin 的批量删除功能（Batch Delete）涉及 maDatagrid 中的复选框选择、ListController 中的批量操作触发、BatchDeleteController 中的确认弹窗与删除执行、以及 WriteQueries 中的 REST API 调用，但测试覆盖严重不足。需要为该功能编写完整的测试套件：包括 maDatagrid 复选框全选/单选的 scope 状态测试、BatchDeleteController 的确认/取消流程测试、WriteQueries 批量 DELETE 请求的 $httpBackend mock 测试、以及删除成功/失败后列表刷新与错误提示的集成测试。"""
+acceptance_criteria = [
+  "新增 BatchDeleteControllerSpec.js 测试文件，覆盖：初始化状态、确认删除调用 WriteQueries、取消删除不发送请求、删除成功后跳转回列表页",
+  "在 maDatagridSpec.js 中新增复选框相关测试：单行勾选更新 selection 数组、表头全选/取消全选、翻页后 selection 正确清空",
+  "为 WriteQueries 的批量删除方法编写测试，使用 $httpBackend mock 验证对每个选中实体发送独立 DELETE 请求",
+  "编写集成测试验证：选中 3 行 → 点击批量删除 → 确认弹窗 → 3 个 DELETE 请求发送 → 列表自动刷新且被删行消失",
+  "测试覆盖删除部分失败的场景：3 个请求中 1 个返回 500，验证错误通知显示且成功删除的行仍从列表移除",
+  "所有新增测试通过 karma/grunt test 运行通过，不影响已有测试套件",
+]
+prompt_qwen = """ng-admin 的批量删除功能测试覆盖太少了，帮我把相关的单元测试补全"""
+followups_qwen = [
+  "先补全 BatchDeleteControllerSpec.js，现在只有一个 error 的 case，加上成功删除后调用 $state.go 跳回列表页、back() 取消不触发 WriteQueries.batchDelete、初始化时 entityIds 正确赋值、progression.start 被调用这几个测试",
+  "在 maDatagridSpec.js 里补 selection 相关测试，验证绑定了 selection 属性时表头和行内会渲染 checkbox，没绑定时不渲染；DatagridControllerSpec.js 里补一下对同一条目连续 toggle 两次后 selection 恢复为空的边界测试",
+  "给 maBatchDeleteButton 指令新建测试文件，验证点击后调 $state.go 跳转到 batchDelete 路由并传了正确的 ids 数组，最后确保所有新旧测试能通过 karma 运行",
+]
+prompt_claude = """帮我给 ng-admin 批量删除相关功能补写单元测试，现在测试覆盖严重不足"""
+followups_claude = [
+  "BatchDeleteControllerSpec.js 目前只有一个 on error 测试，补上：成功删除后 $state.go 被调用并跳转到 list、调用 back() 时不触发 WriteQueries.batchDelete、构造函数初始化后 entityIds 等于 $state.params.ids、batchDelete 执行时 progression.start 被调用",
+  "maDatagridSpec.js 完全没测 selection，加几个测试验证传入 selection 属性时渲染 ma-datagrid-multi-selector 和 ma-datagrid-item-selector，不传时这些元素不出现；DatagridControllerSpec.js 补个对同一个 entry 连续 toggleSelect 两次后 selection 回到空数组的测试",
+  "新建 maBatchDeleteButton 的测试文件，测试点击触发 $state.go('batchDelete', ...) 并且 ids 参数是 selection 中各 entry 的 identifierValue，跑一遍 karma 确认所有测试通过",
+]
+
+[[task]]
+id = "CT-0013"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\pkgroll"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "devtools_test"
+language = "ts"
+task_title = "修复 cleanDist 对危险目录路径缺乏安全校验的问题"
+task_description = """在 `src/utils/clean-dist.ts` 中，`cleanDist` 函数直接对传入的 `directoryPath` 执行 `fs.promises.rm` 递归删除，没有任何安全检查。当用户通过 `--dist .` 或 `--dist /` 误配置时，会导致整个项目目录甚至系统根目录被递归删除。同时 `src/cli.ts` 中 `fs.realpathSync.native(argv.flags.src)` 在 src 目录不存在时会抛出不友好的 ENOENT 原生错误，而非提供有意义的错误信息。需要在 cleanDist 中添加路径安全校验（禁止删除项目根目录或其父目录），并在 CLI 层对 src 目录不存在的情况给出清晰的错误提示。"""
+acceptance_criteria = [
+  "cleanDist 函数在 directoryPath 解析为当前工作目录（cwd）或其祖先目录时抛出明确的错误信息而非执行删除操作",
+  "cleanDist 函数拒绝处理空字符串、'.'、'/' 等危险路径输入",
+  "CLI 在 --src 指定的目录不存在时输出 'Source directory not found: <path>' 并以 exitCode 1 退出，而非抛出 ENOENT 原生异常",
+  "在 tests/specs/builds/clean-dist.ts 中新增至少 2 个测试用例验证危险路径被正确拒绝",
+  "在 tests/specs/error-cases.ts 中新增 1 个测试用例验证不存在的 src 目录的错误提示",
+]
+prompt_qwen = """cleanDist 没做路径安全检查，--dist 传个 . 或 / 就能把整个项目删了，帮我修一下"""
+followups_qwen = [
+  "顺便把 CLI 里 src 目录不存在时抛的原生 ENOENT 错误也处理一下，给个清晰的提示信息",
+  "在 clean-dist 的测试文件里加几个测试用例，验证各种危险路径输入会被正确拒绝",
+  "error-cases 测试里也加一个用例，验证 src 目录不存在时的错误提示",
+]
+prompt_claude = """clean-dist 有安全隐患，dist 配成当前目录或根目录会递归删除所有文件，帮修一下"""
+followups_claude = [
+  "CLI 里 src 目录不存在时也会抛原生 ENOENT 错误，也处理一下给个有意义的提示",
+  "给 clean-dist 测试文件补几个用例，覆盖各种危险路径被正确拒绝的场景",
+  "error-cases 测试里也加一个用例，测试 src 目录不存在时的错误信息",
+]
+
+[[task]]
+id = "CT-0014"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\claude-octopus"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "devtools_test"
+language = "shell"
+task_title = "解释 retry 模块的级联重试与下游传播机制"
+task_description = """ctpipe 的 retry 模块实现了一套级联重试机制：当某个管道阶段失败时，不仅重试该阶段本身，还会自动传播到下游阶段。请深入阅读 ctpipe/retry.py、ctpipe/state.py 和 ctpipe/config.py，完整解释以下内容：
+
+1. `_DOWNSTREAM` 字典如何定义阶段间的依赖关系，以及 `_expand_cascade` 函数如何根据 model-agnostic 阶段（prepare/finalize）和 model-specific 阶段（run/collect/score）的区别进行不同的扇出逻辑。
+2. `retry()` 主函数的多轮重试循环：每轮如何区分 exhausted（超过最大重试次数）和 retryable 条目，如何在 reset 前保存 retry_count 以防止计数丢失，以及 `_mark_permanently_failed` 的终态标记策略。
+3. `PipelineState` 的 `batch()` 上下文管理器和 `set()` 方法中 `retry_count` 的保留机制如何配合 retry 模块工作，确保状态更新的原子性和计数一致性。
+
+请用 shell 脚本编写一个演示脚本 `docs/explain_retry_cascade.sh`，通过构造模拟 pipeline_state.json 并运行 `ctpipe retry --dry-run` 命令来展示级联行为，脚本中用注释详细解释每个步骤的预期输出。"""
+acceptance_criteria = [
+  "演示脚本 docs/explain_retry_cascade.sh 可执行，包含至少3个场景：prepare 失败的全量扇出、run/qwen 失败的单模型级联、retry_count 超限的永久失败标记",
+  "脚本中的注释准确解释了 _expand_cascade 对 model-agnostic（走 for model in models 循环+continue）和 model-specific（携带自身 model）两种分支的区别",
+  "注释准确说明了 saved_counts 机制：为什么必须在 _reset_entries 之前读取 retry_count，以及 _increment_retry_count 如何使用 saved_counts 参数恢复计数",
+  "注释解释了 PipelineState.set() 中 retry_count 的 preserve 逻辑：当 status 字段变更时，如果调用方未显式提供 retry_count，则从 existing 状态中继承",
+]
+prompt_qwen = """帮我写个 shell 脚本解释 ctpipe retry 模块的级联重试机制，要能实际跑 dry-run 演示"""
+followups_qwen = [
+  "脚本里分两个场景演示 _expand_cascade 的两种分支——prepare 失败时扇出到所有模型的下游，run/qwen 失败时只级联自己的 model，注释里解释清楚代码里这两条路径的区别",
+  "再加个 retry_count 超限被标 permanently_failed 的场景，注释要说明 saved_counts 为什么必须在 _reset_entries 之前读取，以及 _increment_retry_count 怎么用它恢复计数",
+  "把 state.py 里 PipelineState.set() 对 retry_count 的 preserve 逻辑也用注释解释进去，说清楚它怎么和 retry 模块配合保证计数一致性的，确保脚本加了 shebang 能直接执行",
+]
+prompt_claude = """帮我分析一下 ctpipe 的 retry 模块怎么做级联重试的，写个可运行的 shell 演示脚本"""
+followups_claude = [
+  "脚本要包含两种级联场景的对比——prepare 失败走 for model in models 循环做全量扇出，run/qwen 失败只携带自身 model 做单链级联，注释里解释 _expand_cascade 里这两个分支的逻辑区别",
+  "加一个 retry_count 超过 max-retries 后被标记 permanently_failed 的场景，注释说明为什么必须在 _reset_entries 之前通过 saved_counts 保存计数，以及 _increment_retry_count 如何利用它",
+  "注释中补充 state.py 的 set() 方法在 status 变更时对 retry_count 的自动 preserve 机制，解释它和 retry 模块的协作关系，脚本要加 shebang 能直接 bash 执行",
+]
+
+[[task]]
+id = "CT-0015"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\claude-octopus"
+clone_method = "git"
+task_type = "feature"
+domain = "devtools_test"
+language = "shell"
+task_title = "为 ctpipe 添加 pipeline 健康检查摘要命令"
+task_description = """当前 ctpipe 的 `stats` 命令只显示各阶段的完成状态统计，`check` 命令只做深度校验。需要一个新的 `health` 子命令，综合展示管道整体健康状况，帮助用户快速诊断问题。请实现以下功能：
+
+1. 在 `ctpipe/health.py` 中实现 `health_check()` 函数，综合检查以下指标：
+   - 各阶段的成功/失败/永久失败/待处理计数
+   - passrate 阈值违规的任务清单（复用 config.py 中的 `check_passrate_thresholds`）
+   - 轨迹文件完整性（文件存在性+最小行数检查，复用 trajectory.py 的 `parse_trajectory`）
+   - 评分文件一致性（复用 toml_utils.py 的 `is_complete_rubric`）
+   - permanently_failed 条目的错误原因汇总
+2. 输出格式为 JSON 结构化报告，包含 `overall_status`（healthy/degraded/critical）、`stage_summary`、`threshold_violations`、`integrity_issues` 四个顶层字段。
+3. 在 `ctpipe/cli.py` 中注册 `health` 子命令，支持 `--tasks`、`--models`、`--output` 参数。
+4. 编写 `scripts/health_check.sh` 封装脚本，调用 `ctpipe health --output health_report.json` 后解析 overall_status 字段，返回对应退出码（healthy=0, degraded=1, critical=2）。
+
+需要跨文件复用现有的状态读取、阈值检查和文件校验逻辑，不得重复实现。"""
+acceptance_criteria = [
+  "ctpipe/health.py 中的 health_check() 返回结构化字典，overall_status 基于以下规则：有 permanently_failed → critical，有 threshold_violations 或 integrity_issues → degraded，否则 healthy",
+  "passrate 阈值检查复用 config.py 的 check_passrate_thresholds()，不重复实现阈值常量或比较逻辑",
+  "轨迹完整性检查复用 trajectory.py 的 parse_trajectory()，评分检查复用 toml_utils.py 的 is_complete_rubric()",
+  "cli.py 中注册 health 子命令，支持 --tasks、--models（默认 qwen/claude）、--output（默认 stdout）三个参数",
+  "scripts/health_check.sh 可执行，根据 overall_status 返回正确的退出码（0/1/2），使用 jq 或 python -c 解析 JSON",
+]
+prompt_qwen = """帮我给 ctpipe 加一个 health 子命令，综合展示管道的整体健康状况"""
+followups_qwen = [
+  "在 health.py 里写 health_check() 函数，检查各阶段状态计数、passrate 阈值违规、轨迹文件完整性和评分一致性，复用现有的 check_passrate_thresholds、parse_trajectory 和 is_complete_rubric，不要重复实现",
+  "输出改成 JSON，顶层字段包含 overall_status、stage_summary、threshold_violations、integrity_issues。有 permanently_failed 条目就 critical，有阈值违规或完整性问题就 degraded，否则 healthy。在 cli.py 注册 health 子命令，支持 --tasks、--models、--output 参数",
+  "写个 scripts/health_check.sh 封装脚本，调完 ctpipe health --output health_report.json 后解析 overall_status 字段，返回退出码 healthy=0 degraded=1 critical=2",
+  "加测试，覆盖三种 overall_status 的判定逻辑和 shell 脚本退出码",
+]
+prompt_claude = """给 ctpipe 加个 health 命令，综合检查管道健康度，方便快速诊断问题"""
+followups_claude = [
+  "health_check() 放 health.py 里，要检查阶段状态计数、passrate 阈值、轨迹完整性、评分文件一致性，直接复用 check_passrate_thresholds、parse_trajectory、is_complete_rubric 这些现有函数，别重复造轮子",
+  "输出结构化 JSON，含 overall_status（healthy/degraded/critical）、stage_summary、threshold_violations、integrity_issues 四个顶层字段。permanently_failed 就 critical，有阈值违规或完整性问题就 degraded，其余 healthy。cli.py 里注册 health 子命令，支持 --tasks、--models、--output",
+  "加个 scripts/health_check.sh，调用 ctpipe health --output health_report.json 然后解析 overall_status，对应退出码 healthy=0 degraded=1 critical=2",
+  "写几个测试覆盖三种健康状态的判定逻辑和 shell 脚本的退出码",
+]
+
+[[task]]
+id = "CT-0016"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\swagger2markup"
+clone_method = "git"
+task_type = "feature"
+domain = "backend_service"
+language = "java"
+task_title = "为 swagger2markup-builder 新增 Markdown 格式输出支持"
+task_description = """当前 swagger2markup-builder 仅支持 AsciiDoc 格式输出（通过 swagger2markup-asciidoc 模块）。需要新增 Markdown 格式输出功能，使用户可以通过 Swagger2MarkupConfig 选择输出 Markdown 文档。实现时需要参考 swagger2markup-asciidoc 模块的 MarkupDocBuilder 接口实现模式，在新模块或现有模块中创建 MarkdownDocBuilder，实现对 API 路径（Paths）、模型定义（Definitions/Schemas）和安全定义（Security）三大部分的 Markdown 格式渲染。输出需支持 GFM（GitHub Flavored Markdown）表格语法和代码围栏语法。"""
+acceptance_criteria = [
+  "新增 MarkdownDocBuilder 类实现与 AsciiDocBuilder 相同的 MarkupDocBuilder 接口",
+  "支持将 Swagger 规范中的 Paths、Definitions、Security 三个部分渲染为合法的 GFM Markdown",
+  "Swagger2MarkupConfig 中新增 MarkupLanguage.MARKDOWN 枚举值，用户可通过配置选择输出格式",
+  "Markdown 输出支持 GFM 表格语法（竖线分隔）和三反引号代码围栏语法",
+  "为 Markdown 输出新增至少 5 个单元测试，覆盖标题层级、表格、代码块、链接和列表的渲染",
+  "使用 Petstore Swagger 样例规范进行端到端转换测试，生成的 Markdown 文件可被 GitHub 正确渲染",
+]
+prompt_qwen = """这个项目目前只能输出AsciiDoc格式，帮我加上Markdown格式的文档输出支持"""
+followups_qwen = [
+  "参考 swagger2markup-asciidoc 模块的实现模式，新建一个 Markdown 的文档构建器，实现跟 AsciiDoc 构建器相同的接口",
+  "Markdown 输出要支持 GFM 表格语法和三反引号代码围栏，把 Paths、Definitions、Security 三个部分都能正确渲染成 Markdown",
+  "在配置里加一个 MARKDOWN 的枚举选项，让用户可以通过配置来切换输出格式",
+  "写单元测试覆盖标题层级、表格、代码块、链接和列表这几种渲染，再用 Petstore 样例规范跑一个端到端的转换测试",
+]
+prompt_claude = """项目现在只支持AsciiDoc输出，我需要加一个Markdown格式的输出功能"""
+followups_claude = [
+  "照着 swagger2markup-asciidoc 模块的结构，创建一个 Markdown 文档构建器，要实现和 AsciiDoc 构建器一样的接口",
+  "输出的 Markdown 要用 GFM 竖线表格和三反引号代码块语法，Paths、Definitions、Security 这三部分都要能渲染",
+  "配置里增加一个 MARKDOWN 枚举值，用户能通过配置选择生成 Markdown 还是 AsciiDoc",
+  "加单元测试覆盖标题、表格、代码块、链接、列表的渲染逻辑，另外用 Petstore 样例做一个完整的端到端转换测试",
+]
+
+[[task]]
+id = "CT-0017"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\claude-octopus"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "devtools_test"
+language = "shell"
+task_title = "解释 score 模块的双模型评分一致性保障流程"
+task_description = """ctpipe 的评分模块需要确保 qwen 和 claude 两个模型在同一任务上使用完全相同的评分维度和描述，以保证 passrate 的可比性。请深入阅读 ctpipe/score.py、ctpipe/toml_utils.py 和 ctpipe/config.py，完整解释以下机制：
+
+1. `score_all()` 中 `score_task_pair` 内部函数的三层维度选择策略：(a) 优先使用已有的自定义 rubric 模板 `has_custom_descriptions()`、(b) 自动调用 `_auto_customize_criteria()` 生成项目特化的评分标准、(c) 兜底使用自由选择模式。解释为什么 qwen 必须先评分、claude 必须复用 qwen 的维度名。
+2. `_parse_scored_toml()` 中 `custom_criteria` 参数的防漂移机制：为什么需要用原始模板的 description 和 weight 覆盖 AI 返回的值，以及 `use_custom_descriptions` 标志如何触发 `has_score_tiers()` 验证。
+3. passrate 感知评分：`passrate_hint` 参数如何被注入评分 prompt，以及 `auto_rescore` 标志如何在评分完成后检查阈值并触发 rescore 二次评分。
+
+请编写 `docs/explain_score_consistency.sh` 脚本，使用 shell 命令模拟一个完整的评分流程场景，通过注释逐步解释 score_all 在不同条件分支下的执行路径。"""
+acceptance_criteria = [
+  "脚本注释准确解释了 score_task_pair 中 custom_crit 的三层优先级：rubric 模板文件 > _auto_customize_criteria > 自由选择",
+  "注释解释了 _parse_scored_toml 中 custom_map 的防漂移逻辑：AI 可能修改 description，但代码用 custom_map[name] 强制恢复原始模板值",
+  "注释解释了 qwen 先评分的原因：claude 需要复用 qwen 选出的维度名列表（selected_names）以保证可比性，并说明了当 qwen 已有自定义描述时 claude 如何通过 qwen_full_crit 继承完整的 Criterion 对象",
+  "注释准确描述了 auto_rescore 的触发条件：评分完成后遍历所有任务检查 check_passrate_thresholds()，将违规任务 ID 传给 rescore_all()",
+]
+prompt_qwen = """帮我分析 score 模块的双模型评分一致性机制，写个 docs/explain_score_consistency.sh 用注释解释完整流程"""
+followups_qwen = [
+  "把 score_task_pair 里维度选择的三层优先级逻辑讲清楚：rubric 模板文件、_auto_customize_criteria、自由选择分别什么时候触发",
+  "再加上 _parse_scored_toml 里 custom_map 的防漂移机制，还有 qwen 先评分 claude 复用维度名的原因，特别是 qwen_full_crit 那段继承逻辑",
+  "补上 passrate_hint 怎么注入评分 prompt 以及 auto_rescore 的触发条件，check_passrate_thresholds 检查了哪些阈值",
+  "加几个边界场景的注释：qwen 评分失败时 claude 怎么走，已有分数但维度不匹配怎么处理，已有分数用的通用描述但现在有了自定义模板怎么办",
+]
+prompt_claude = """读一下评分模块里 qwen 和 claude 一致性保障的逻辑，写个 docs/explain_score_consistency.sh 脚本把流程讲清楚"""
+followups_claude = [
+  "详细解释 score_task_pair 中 custom_crit 的三层选择策略：什么条件走 rubric 模板、什么条件走 _auto_customize_criteria、什么条件走自由选择",
+  "解释 _parse_scored_toml 的 custom_map 防漂移逻辑和 qwen 必须先评分的原因，重点说清楚 claude 通过 qwen_full_crit 继承完整 Criterion 对象那段",
+  "加上 passrate_hint 注入 prompt 的方式和 auto_rescore 触发逻辑，说明 check_passrate_thresholds 具体检查了哪些阈值条件",
+  "补充边界场景注释：qwen 评分失败 claude 降级为自由选择、已有分数维度不匹配触发重评、已有通用描述分数但自定义模板可用时的重评逻辑",
+]
+
+[[task]]
+id = "CT-0018"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\claude-octopus"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "devtools_test"
+language = "shell"
+task_title = "解释 PipelineState 的并发安全与批量写入机制"
+task_description = """ctpipe 的管道在 run 和 score 阶段使用 asyncio 并发执行多个任务，每个任务都会频繁更新 pipeline_state.json。请深入阅读 ctpipe/state.py、ctpipe/run.py 和 ctpipe/score.py，完整解释 PipelineState 如何在并发环境下保证数据一致性：
+
+1. `PipelineState` 的线程安全机制：`_lock = threading.RLock()` 在 asyncio 协程环境中的实际作用，为什么选择 RLock 而非 Lock，以及 `get()`/`set()`/`reset()` 三个核心方法中锁的粒度和覆盖范围。
+2. `batch()` 上下文管理器的延迟写入优化：`_batch_depth` 计数器如何支持嵌套 batch，为什么 `set()` 在 `_batch_depth == 0` 时立即 `save()` 而在 batch 内跳过，以及 `save()` 使用临时文件 + `replace()` 实现原子写入的原理。
+3. `set()` 方法中的状态合并策略：当 `status` 字段存在于 `data` 中时为什么执行全量替换而非增量更新，以及 `retry_count` 的特殊保留逻辑（从 `existing` 中继承）如何防止 retry 模块的计数丢失。
+4. `run_all()` 和 `score_all()` 中的并发模型：`asyncio.Semaphore(config.max_parallel * 2)` 控制并发度，`asyncio.gather(*coros, return_exceptions=True)` 的异常隔离策略，以及 `state.batch()` 在 `score_all` 中包裹 gather 的目的。
+
+请编写 `docs/explain_state_concurrency.sh` 脚本，用 shell 命令演示并发写入 pipeline_state.json 可能导致的问题，以及 PipelineState 如何通过上述机制避免这些问题。"""
+acceptance_criteria = [
+  "脚本注释准确解释 RLock 的选择原因：batch() 内部调用 set()，set() 内部也获取锁，RLock 允许同一线程重入避免死锁",
+  "注释解释了 _batch_depth 的嵌套计数机制：只有最外层 batch 退出时（depth 回到 0）才触发 save()，避免中间状态写盘",
+  "注释准确描述了 set() 的两种模式：有 status 字段时执行全量替换（只保留 retry_count），无 status 字段时执行增量合并（{**existing, **data}）",
+  "注释解释了 save() 的原子写入：先写入 .tmp 文件再 os.replace()，即使进程崩溃也不会损坏 pipeline_state.json",
+  "注释说明了 score_all 中 state.batch() 包裹 asyncio.gather 的目的：所有并发评分任务共享一次磁盘写入，减少 I/O 开销",
+]
+prompt_qwen = """帮我解释一下 ctpipe/state.py 里 PipelineState 的并发安全机制，写个 docs/explain_state_concurrency.sh 脚本用注释详细说明"""
+followups_qwen = [
+  "重点说明 batch() 的 _batch_depth 嵌套计数怎么工作的，为什么只在最外层退出时才 save，还有 save() 用 .tmp + replace 做原子写入的原理",
+  "再分析 set() 方法的两种模式：有 status 时全量替换 vs 没有时增量合并，特别是 retry_count 从 existing 继承的逻辑是怎么防止 retry 模块丢计数的",
+  "把 run.py 的 run_all 和 score.py 的 score_all 也分析进去，解释 Semaphore 控制并发度、gather(return_exceptions=True) 异常隔离、score_all 里 batch() 包裹 gather 减少磁盘 I/O 的设计",
+  "脚本里加一段 shell 模拟实验，演示多进程并发写同一个 JSON 会损坏数据，然后对比 PipelineState 的原子写入方案",
+]
+prompt_claude = """读一下 ctpipe/state.py 的 PipelineState，帮我写一个 docs/explain_state_concurrency.sh 把它的并发安全和批量写入机制用注释解释清楚"""
+followups_claude = [
+  "详细解释 batch() 上下文管理器里 _batch_depth 计数器的嵌套机制，为什么 depth 回到 0 才触发 save()，以及 save() 通过临时文件 + os.replace 实现原子写入的细节",
+  "补充分析 set() 的状态合并策略：带 status 字段走全量替换只保留 retry_count，不带 status 走增量合并，说清楚这个 retry_count 保留逻辑怎么配合 retry.py 工作",
+  "再把 run_all 和 score_all 的并发模型也解释一下：Semaphore 怎么限并发、gather 的 return_exceptions=True 怎么隔离异常、score_all 用 state.batch() 包住 gather 的目的",
+  "加一段 shell 并发写入实验，模拟多个进程同时写一个 JSON 文件导致内容损坏，和 PipelineState 的 tmp+replace 原子写入做对比演示",
+]
+
+[[task]]
+id = "CT-0019"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\swagger2markup"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "backend_service"
+language = "java"
+task_title = "修复 OpenAPI 3.x 规范中 oneOf/anyOf 嵌套引用导致 StackOverflowError 的问题"
+task_description = """openapi2markup 模块在处理包含循环 oneOf/anyOf 嵌套引用的 OpenAPI 3.x 规范时，会因递归解析陷入无限循环，最终抛出 StackOverflowError。例如，当 SchemaA 的 oneOf 引用 SchemaB，而 SchemaB 的 anyOf 又引回 SchemaA 时，解析器无法检测到循环并终止递归。需要在 openapi2markup 的 Schema 解析流程中加入循环引用检测机制（如使用 visited set 追踪当前解析路径），在检测到循环时生成一个指向已定义 Schema 的文档链接，而非继续递归展开。同时需要确保 swagger2markup-asciidoc 模块对循环引用标记的正确渲染。"""
+acceptance_criteria = [
+  "构造包含 oneOf/anyOf 循环引用的 OpenAPI 3.x 测试用例 YAML 文件，转换过程不再抛出 StackOverflowError",
+  "循环引用检测使用 Set<String> 追踪当前解析路径，在 Schema 解析入口处检查并在出口处移除",
+  "检测到循环引用时，在生成的 AsciiDoc 文档中输出 '参见 <<schema_name>>' 格式的交叉引用链接",
+  "非循环引用的 oneOf/anyOf 解析行为不受影响，现有测试全部通过",
+  "新增至少 2 个集成测试覆盖直接循环（A->B->A）和间接循环（A->B->C->A）场景",
+]
+prompt_qwen = """openapi2markup 模块解析 OpenAPI 3.x 规范时，如果 oneOf/anyOf 里有循环引用（比如 A 引用 B，B 又引回 A），会直接 StackOverflowError，帮我修一下"""
+followups_qwen = [
+  "用 Set<String> 记录当前解析路径来检测循环，发现循环时不要继续展开，生成一个 '参见 <<schema_name>>' 这样的 AsciiDoc 交叉引用链接",
+  "确保 swagger2markup-asciidoc 模块能正确渲染这个循环引用标记，别影响现有的非循环 oneOf/anyOf 解析逻辑，跑一下现有测试确认没回归",
+  "写集成测试，至少覆盖两种场景：A->B->A 的直接循环和 A->B->C->A 的间接循环，用 YAML 测试文件验证转换不报错且输出包含交叉引用",
+]
+prompt_claude = """openapi2markup 解析含有 oneOf/anyOf 循环引用的 OpenAPI 3.x 文档会栈溢出，帮我修复这个递归死循环的问题"""
+followups_claude = [
+  "检测循环的方式用 visited set 追踪解析路径，进入 schema 时加入、退出时移除，碰到循环就输出 '参见 <<schema_name>>' 格式的 AsciiDoc 交叉引用而不是继续递归",
+  "swagger2markup-asciidoc 那边也要确认循环引用标记能正常渲染，另外确保普通的非循环 oneOf/anyOf 不受影响，现有测试不能挂",
+  "加两个以上的集成测试：一个测直接循环（A->B->A），一个测间接循环（A->B->C->A），构造对应的 OpenAPI YAML 文件，验证不抛异常且生成的文档包含交叉引用链接",
+]
+
+[[task]]
+id = "CT-0020"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\swagger2markup"
+clone_method = "git"
+task_type = "enhancement"
+domain = "backend_service"
+language = "java"
+task_title = "为 Swagger2Markup 转换器增加模型定义引用缓存机制"
+task_description = """当前 swagger2markup-core 模块在转换大型 Swagger/OpenAPI 规范时，对 $ref 引用的 Schema 模型定义会被重复解析，导致性能下降。需要在 swagger2markup-core 的核心转换链路中引入一个线程安全的引用解析缓存（如 ConcurrentHashMap），使已解析过的 Schema 定义能被复用。缓存应在 Swagger2MarkupConverter 生命周期内有效，并在转换完成后自动清理。该增强需要修改 core 模块的模型解析逻辑，同时确保 swagger2markup-asciidoc 等下游输出模块能正确消费缓存后的结果。"""
+acceptance_criteria = [
+  "在 swagger2markup-core 中新增 SchemaReferenceCache 类，使用 ConcurrentHashMap 存储已解析的 Schema 定义",
+  "Swagger2MarkupConverter 在初始化时创建缓存实例，并在 convert() 结束后调用 clear() 释放缓存",
+  "对包含超过 50 个 $ref 引用的 Swagger 规范文件，转换耗时相比无缓存版本降低至少 20%",
+  "现有 swagger2markup 和 swagger2markup-asciidoc 模块的所有单元测试保持通过",
+  "新增至少 3 个单元测试验证缓存命中、缓存未命中和缓存清理场景",
+]
+prompt_qwen = """这个项目转换大 Swagger 文件时 $ref 引用的 Schema 重复解析太慢了，帮我在 core 模块加个缓存"""
+followups_qwen = [
+  "在 core 模块新建一个 SchemaReferenceCache 类，用 ConcurrentHashMap 做线程安全的缓存，存储已解析过的 Schema 定义",
+  "把缓存集成到转换器的生命周期里，初始化时创建实例，convert 结束后自动 clear 释放掉，顺便确认 asciidoc 那些下游模块消费缓存结果不受影响",
+  "写几个单元测试，验证缓存命中、缓存未命中和缓存清理这三个场景，确保现有测试也能跑过",
+]
+prompt_claude = """swagger2markup-core 转换大型 Swagger 规范时 $ref 引用重复解析性能很差，加个引用缓存机制"""
+followups_claude = [
+  "core 模块里加一个 SchemaReferenceCache，底层用 ConcurrentHashMap 存已解析的 Schema 定义，保证线程安全",
+  "缓存要跟转换器生命周期绑定，初始化时创建缓存实例，convert 完成后调 clear 清掉，确保 asciidoc 等下游输出模块能正常消费缓存后的结果",
+  "加单元测试，至少覆盖缓存命中、未命中和清理三种场景，现有的测试也都不能挂",
+]
+
+[[task]]
+id = "CT-0021"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\lottie"
+clone_method = "git"
+task_type = "documentation"
+domain = "docs_knowledge"
+language = "html/css"
+task_title = "为 Lottie JSON 属性编写结构化交互式速查参考页面"
+task_description = """Lottie 文档目前缺乏对 Lottie JSON 动画格式中核心属性（如 layers、shapes、assets、effects、transforms）的结构化参考文档。需要新建一个 lottie-json-reference.md 页面，在其中使用 HTML 表格和可折叠区块（<details>/<summary>）呈现 Lottie JSON 的层级属性结构，包含属性名、类型、是否必填、默认值和描述。页面需要通过内嵌 <style> 标签添加自定义 CSS 来美化表格和折叠面板的样式，使其与 docsify 整体视觉风格一致。同时需将该页面加入 _sidebar.md 导航，并在 README.md 首页添加指向该页面的入口链接。"""
+acceptance_criteria = [
+  "新建 lottie-json-reference.md 文件，包含 Lottie JSON 顶层属性（v, fr, ip, op, w, h, layers, assets）及 layers 子属性的结构化文档",
+  "使用 HTML <table> 呈现属性信息，至少包含 name、type、required、default、description 五列",
+  "使用 <details>/<summary> 实现嵌套属性的可折叠展示（如 layers → transform → position），至少 3 层嵌套",
+  "通过内嵌 <style> 标签定义表格样式（斑马纹行、hover 高亮、固定表头）和折叠面板样式（展开/折叠图标、缩进层级可视化）",
+  "_sidebar.md 中添加该页面的导航条目，位于合适的层级位置",
+  "README.md 首页中添加指向该参考页面的链接入口",
+]
+prompt_qwen = """帮这个 Lottie 文档项目新建一个 JSON 属性速查参考页面"""
+followups_qwen = [
+  "用 HTML table 展示 Lottie JSON 的顶层属性（v, fr, ip, op, w, h, layers, assets），每个属性要有 name、type、required、default、description 五列。对 layers 这种有子属性的用 details/summary 做可折叠嵌套，嵌套层级至少三层深度",
+  "在文件顶部内嵌 style 标签加自定义 CSS，表格要有斑马纹行、hover 高亮和固定表头效果，折叠面板要有展开收起图标和层级缩进的视觉区分，整体风格跟项目现有的 docsify 主题保持一致",
+  "把新页面加到 _sidebar.md 的导航里，再在首页加一个指向这个参考页面的入口链接",
+]
+prompt_claude = """给项目加一个 Lottie JSON 格式的结构化属性参考文档"""
+followups_claude = [
+  "页面里用 HTML table 列出顶层属性（v, fr, ip, op, w, h, layers, assets），表格要有 name、type、required、default、description 五列。layers 这种有子结构的属性用 details/summary 做折叠展示，嵌套至少三层",
+  "页面里内嵌 style 标签写自定义样式，表格加斑马纹、hover 高亮、固定表头，折叠面板加展开收起图标和缩进层级的视觉效果，整体风格要跟 docsify 主题协调",
+  "把这个页面加到 _sidebar.md 导航中，并在首页加一个链接入口",
+]
+
+[[task]]
+id = "CT-0022"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\lottie"
+clone_method = "git"
+task_type = "enhancement"
+domain = "docs_knowledge"
+language = "html/css"
+task_title = "为文档站点集成 docsify 全文搜索插件并定制搜索 UI 样式"
+task_description = """当前 Lottie 文档站点未启用搜索功能，用户只能通过侧边栏手动浏览内容。需要在 index.html 中集成 docsify 的全文搜索插件（docsify-search），配置搜索参数（placeholder、noData、paths、depth 等），并通过自定义 CSS 重新设计搜索框和搜索结果列表的视觉样式，使其与站点整体设计语言统一。搜索框需支持键盘快捷键（Ctrl+K / Cmd+K）快速聚焦。搜索结果中的匹配关键词需要自定义高亮颜色，结果条目应展示来源页面的面包屑路径。"""
+acceptance_criteria = [
+  "index.html 中正确引入 docsify-search 插件 CDN 脚本，并在 window.$docsify 配置中添加 search 配置项",
+  "搜索配置包含 placeholder（中英文兼顾）、noData 提示文案、maxAge 缓存时间、paths 搜索范围",
+  "通过自定义 CSS 重写 .search 输入框样式（圆角、聚焦边框色、图标）和 .matching-post 结果列表样式（卡片式布局、hover 效果）",
+  "搜索结果中匹配的关键词使用自定义高亮背景色（非默认黄色），与站点主色调协调",
+  "添加 JS 监听 Ctrl+K（Windows）和 Cmd+K（Mac）快捷键，聚焦到搜索输入框",
+  "空搜索结果时展示友好的 noData 提示，包含引导用户浏览侧边栏的链接",
+]
+prompt_qwen = """帮我在这个 docsify 文档站点里加上全文搜索功能，搜索样式要跟站点整体风格统一"""
+followups_qwen = [
+  "搜索配置再完善一下，placeholder 要中英文都考虑到，noData 的提示文案写友好点，加上 maxAge 缓存和 paths 搜索范围配置",
+  "用自定义 CSS 重写搜索框和结果列表的样式，搜索框要圆角带聚焦边框，结果列表做成卡片式布局有 hover 效果，匹配关键词的高亮颜色换掉默认的黄色，跟站点主色调搭配",
+  "加个键盘快捷键，Windows 上 Ctrl+K、Mac 上 Cmd+K 可以快速聚焦到搜索框",
+  "空搜索结果的时候显示一个友好的提示，引导用户去侧边栏浏览内容",
+]
+prompt_claude = """这个 docsify 文档站点没有搜索功能，帮我集成 docsify-search 插件并把搜索 UI 样式定制一下"""
+followups_claude = [
+  "把搜索的配置项补充完整，placeholder 要兼顾中英文用户，noData 提示要友好一些，还有 maxAge 缓存时间和 paths 搜索范围也配上",
+  "自定义 CSS 把搜索框改成圆角样式加聚焦时的边框效果，搜索结果做成卡片布局带 hover 状态，关键词高亮不要用默认黄色，换个跟站点主色调协调的颜色",
+  "监听 Ctrl+K 和 Cmd+K 快捷键，按下后自动聚焦到搜索输入框",
+  "搜索没结果的时候展示友好的空状态提示，带一个引导去侧边栏浏览的链接",
+]
+
+[[task]]
+id = "CT-0023"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\ng-admin"
+clone_method = "git"
+task_type = "enhancement"
+domain = "web_frontend"
+language = "js"
+task_title = "增强侧边栏菜单支持多级嵌套分组与折叠展开交互"
+task_description = """当前 ng-admin 侧边栏（maSidebar/maMenu）仅支持一级菜单项的平铺展示，当 Entity 数量较多时菜单过长难以导航。需要增强菜单系统支持多级嵌套分组：在 NgAdminConfiguration 的 menu() 方法中支持定义树形菜单结构（addChild 链式调用），maSidebar 指令递归渲染子菜单，支持点击父级菜单项折叠/展开子菜单，并记住展开状态。同时需要高亮当前激活的菜单项及其所有父级路径。"""
+acceptance_criteria = [
+  "menu() 配置 API 支持通过 addChild() 链式调用定义多级嵌套菜单（至少支持 3 级）",
+  "maSidebar 指令使用递归模板（ng-include 或自定义指令）正确渲染树形菜单结构",
+  "点击含子菜单的父级项时折叠/展开其子菜单，展开时添加 CSS 过渡动画（slide-down 效果）",
+  "菜单展开/折叠状态通过 localStorage 持久化，刷新页面后恢复上次状态",
+  "当前路由对应的菜单项及其所有祖先节点自动高亮（添加 active 类名），并自动展开所在路径",
+  "无子菜单的叶子节点点击行为与原有逻辑一致，直接导航到对应 Entity 列表页",
+]
+prompt_qwen = """这个项目的侧边栏菜单目前只支持两级嵌套，帮我改成支持任意深度的多级折叠菜单"""
+followups_qwen = [
+  "把 menuBar.html 模板改成递归渲染，不要硬编码两层 ng-repeat，maMenuBar.js 里的 toggleMenu 也要能处理任意层级的折叠展开",
+  "用 localStorage 记住每个菜单项的展开折叠状态，刷新页面能恢复。当前路由对应的菜单项和它所有父级节点要自动高亮加 active 类并展开",
+  "collapsible 的 CSS 过渡在多级嵌套下检查一下，确保每一级折叠展开都有平滑的 slide-down 动画效果，层级缩进也要合理",
+  "在 maMenuBarSpec.js 里补充多级嵌套的测试用例，至少覆盖三级菜单的递归渲染、折叠展开交互和 active 路径高亮",
+]
+prompt_claude = """ng-admin 的菜单栏现在只能展示两级菜单结构，我想让它支持多级嵌套和折叠展开"""
+followups_claude = [
+  "menuBar.html 现在硬编码了两层列表，改成递归方式渲染子菜单支持任意深度，maMenuBar.js 的展开折叠逻辑也要适配多层级",
+  "展开和折叠状态用 localStorage 持久化，刷新后能恢复上次的状态。另外当前路由激活的菜单项及其所有祖先节点要自动添加 active 类并展开",
+  "确保多级嵌套时 collapsible 的 CSS 过渡动画正常工作，每级都要有平滑的滑动效果，不同层级的缩进样式也要区分开",
+  "给 maMenuBarSpec.js 加几个三级嵌套菜单的测试，覆盖递归渲染、toggle 折叠交互和 active 路径高亮逻辑",
+]
+
+[[task]]
+id = "CT-0024"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\lottie"
+clone_method = "git"
+task_type = "enhancement"
+domain = "docs_knowledge"
+language = "html/css"
+task_title = "为 Lottie 文档站点实现深色/浅色主题切换功能"
+task_description = """当前 Lottie 文档站点（基于 docsify）仅有浅色主题，缺乏深色模式支持。需要在 index.html 中添加主题切换按钮（固定在页面右上角），通过 CSS 自定义属性（CSS Variables）定义一套完整的深色主题配色方案（覆盖背景、文字、侧边栏、代码块、链接、表格等元素），并使用 localStorage 持久化用户的主题偏好。切换时需平滑过渡（transition），且需兼容 docsify 的 vue.css 主题文件中已有的样式变量。还需要在 _coverpage.md 封面页上确保深色主题下封面背景和标题文字颜色协调。"""
+acceptance_criteria = [
+  "index.html 中新增主题切换按钮，固定定位在导航栏右上角，点击可在深色/浅色模式间切换",
+  "使用 CSS 自定义属性（:root 和 [data-theme='dark']）定义深色主题的完整配色，覆盖 body 背景、侧边栏、正文文字、链接、代码块、blockquote、表格等至少 8 类元素",
+  "主题偏好通过 localStorage 持久化，页面刷新后保持用户上次选择的主题",
+  "主题切换时所有受影响元素有 CSS transition 平滑过渡效果（duration ≥ 0.2s）",
+  "深色模式下 _coverpage.md 封面页的背景色和文字颜色正确适配，无可读性问题",
+  "支持 prefers-color-scheme 媒体查询作为默认值——首次访问时自动匹配系统偏好",
+]
+prompt_qwen = """帮这个 docsify 文档站加个深色/浅色主题切换，右上角放个切换按钮"""
+followups_qwen = [
+  "用 CSS 自定义属性来定义深色配色方案，要覆盖 body 背景、侧边栏、正文文字、链接、代码块、blockquote、表格这些元素，至少覆盖 8 类",
+  "用 localStorage 记住用户的主题选择，刷新页面后保持不变。另外首次访问时自动匹配系统的深色/浅色偏好",
+  "封面页在深色模式下背景和文字颜色也要适配好，不能有看不清的问题。还有切换主题时所有元素加上平滑过渡效果，transition 至少 0.2s",
+]
+prompt_claude = """给这个 docsify 文档站实现一个深色模式切换功能，在页面右上角加个按钮"""
+followups_claude = [
+  "配色方案用 CSS 变量实现，:root 定义浅色、[data-theme='dark'] 定义深色，要覆盖背景色、侧边栏、正文、链接、代码块、blockquote、表格等至少 8 类元素",
+  "主题选择要通过 localStorage 持久化，刷新后保持上次的选择。首次打开的用户自动根据 prefers-color-scheme 匹配系统主题",
+  "深色模式下 _coverpage.md 封面的背景和标题颜色也得协调好，确保可读性。主题切换时给所有受影响元素加 CSS transition 平滑过渡，duration 不低于 0.2s",
+]
+
+[[task]]
+id = "CT-0025"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\swagger2markup"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "backend_service"
+language = "java"
+task_title = "解释 swagger2markup-core 到 swagger2markup-asciidoc 的文档转换核心链路"
+task_description = """请详细分析并解释从 Swagger/OpenAPI 规范文件输入到 AsciiDoc 文档输出的完整转换链路。需要涵盖以下方面：(1) swagger2markup-core 模块中核心数据模型（如 Swagger2MarkupConverter、SwaggerPathOperation 等）的职责和关系；(2) swagger2markup-builder 模块中 Builder 模式如何组装转换配置和扩展点；(3) swagger2markup-asciidoc 模块中 MarkupDocBuilder 如何将中间模型渲染为 AsciiDoc 标记语言；(4) openapi2markup 与 swagger2markup 两个模块在入口层如何区分 Swagger 2.0 与 OpenAPI 3.x 规范并路由到不同的解析器。要求结合关键类的源码说明调用流程，绘制模块间依赖关系和数据流转图。"""
+acceptance_criteria = [
+  "清晰说明 Swagger2MarkupConverter 类的初始化流程，包括配置加载、扩展注册和规范解析三个阶段",
+  "绘制从 convert() 方法调用开始到 AsciiDoc 文件写入完成的完整调用链时序图或流程图",
+  "解释 swagger2markup-core 定义的 SPI 扩展接口（如 PathsDocExtension、DefinitionsDocExtension）如何被 asciidoc 模块实现",
+  "说明 swagger2markup 和 openapi2markup 模块如何通过规范版本检测实现 Swagger 2.0 和 OpenAPI 3.x 的自动路由",
+  "标注各模块间的 Gradle 依赖关系以及 swagger2markup-bom 的版本管理作用",
+]
+prompt_qwen = """帮我分析一下这个 swagger2markup 项目从 Swagger 规范输入到 AsciiDoc 文档输出的整个转换链路，写一份技术文档说明"""
+followups_qwen = [
+  "先把 Swagger2MarkupConverter 的初始化流程讲清楚，Builder 怎么加载配置、注册扩展、解析规范文件，build() 方法里 SwaggerContext 的组装过程贴上关键代码",
+  "然后说明 toFolder() 里 applyOverviewDocument、applyPathsDocument 这些方法怎么调 MarkupDocBuilder 渲染成 AsciiDoc 的，MarkupDocBuilders 工厂怎么根据 MarkupLanguage 选择 AsciiDocBuilder，整条调用链画个时序图",
+  "再解释一下 spi 包里 PathsDocumentExtension、DefinitionsDocumentExtension 这些扩展点的机制，以及 swagger2markup 和 openapi2markup 两个模块怎么分别处理 Swagger 2.0 和 OpenAPI 3.x 的，SwaggerParser 和 OpenAPIV3Parser 各自在哪用的",
+  "最后把各模块之间的 Gradle 依赖关系整理成图，说明 swagger2markup-bom 的版本管理作用，再画一张整体数据流图把从输入到输出的流转串起来",
+]
+prompt_claude = """帮我梳理这个 swagger2markup 项目的文档转换核心流程，从读入 Swagger/OpenAPI 规范到最终输出 AsciiDoc 文件，写个详细的技术分析文档"""
+followups_claude = [
+  "先从 Swagger2MarkupConverter.Builder 入手，把 readSwagger 解析规范、withConfig 配置加载、initExtensions 扩展注册这三个阶段讲清楚，build() 构造 SwaggerContext 的过程贴关键代码说明",
+  "接着分析 toFolder()/toFile() 的调用链，applyOverviewDocument 到 applySecurityDocument 四个文档怎么通过 MarkupDocBuilder 接口渲染，MarkupDocBuilders 工厂怎么分发到 AsciiDocBuilder，画一张从 convert 调用到文件写入的时序图",
+  "spi 包下的 PathsDocumentExtension 和 DefinitionsDocumentExtension 扩展点具体怎么工作的解释一下，另外 swagger2markup 模块用 SwaggerParser 处理 2.0，openapi2markup 用 OpenAPIV3Parser 处理 3.x，这个路由区分机制说明白",
+  "把 swagger2markup-core、swagger2markup-builder、swagger2markup-asciidoc、swagger2markup、openapi2markup、swagger2markup-bom 这几个模块的 Gradle 依赖关系画成图，再整理一张端到端的数据流图展示从规范文件输入到 AsciiDoc 输出的完整流转",
+]
+
+[[task]]
+id = "CT-0026"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\lottie"
+clone_method = "git"
+task_type = "enhancement"
+domain = "docs_knowledge"
+language = "html/css"
+task_title = "改进 Lottie 文档站点移动端响应式布局与触控体验"
+task_description = """Lottie 文档站点在移动端（<768px）存在多个布局问题：侧边栏（_sidebar）展开后遮挡内容但无明显的关闭机制；代码块（<pre><code>）在窄屏下超出视口宽度导致水平滚动；表格在移动端无法完整展示列内容；导航栏（.app-nav）层叠顺序异常导致下拉菜单被遮挡。需要在 index.html 中添加自定义 CSS（通过 <style> 标签或外链 CSS 文件）和少量 JS，系统性地解决这些移动端适配问题，提升小屏幕设备上的文档阅读和触控操作体验。"""
+acceptance_criteria = [
+  "添加针对 max-width: 768px 的媒体查询样式块，覆盖侧边栏、代码块、表格、导航栏四类元素",
+  "移动端侧边栏展开时显示半透明遮罩层（overlay），点击遮罩或滑动可关闭侧边栏",
+  "代码块（pre > code）在移动端添加 overflow-x: auto 和自定义滚动条样式，禁止整个页面横向滚动",
+  "宽表格在移动端通过 CSS 包裹在可横向滚动容器中（.table-wrapper），并添加渐变边缘提示可滚动",
+  ".app-nav 下拉菜单在移动端 z-index 正确，不被其他元素遮挡",
+  "在 375px（iPhone SE）和 768px（iPad）两个断点下布局无内容溢出或重叠",
+]
+prompt_qwen = """这个 Lottie 文档站手机上看布局很乱，帮我做下移动端响应式适配"""
+followups_qwen = [
+  "先在 index.html 里加媒体查询，侧边栏展开的时候加个半透明遮罩层，点遮罩或者往右滑能关闭侧边栏",
+  "代码块和表格在窄屏下会撑出页面，代码块加 overflow-x: auto，宽表格包一个可横向滚动的容器，再加个渐变边缘提示用户可以滑动",
+  "整个页面禁止横向滚动，搜索框在移动端宽度自适应，sidebar-toggle 按钮大小和位置调整到方便手指点击",
+  "在 375px 和 768px 两个宽度下检查一遍，确保所有页面内容没有溢出和重叠",
+]
+prompt_claude = """帮我改进一下这个 Lottie docsify 文档站的移动端布局，手机上阅读体验不太好"""
+followups_claude = [
+  "index.html 里添加 max-width: 768px 的媒体查询，侧边栏打开时显示一个半透明遮罩，点击遮罩或右滑手势可以关闭侧边栏",
+  "处理代码块和表格在窄屏溢出的问题，pre code 加 overflow-x: auto 和自定义滚动条样式，宽表格套一个横向滚动容器并加渐变阴影提示可滚动",
+  "body 禁止横向滚动，搜索输入框移动端自适应宽度，sidebar-toggle 按钮调大一点方便触控",
+  "375px 和 768px 两个断点下全部页面过一遍，确认没有内容溢出或元素重叠的情况",
+]
+
+[[task]]
+id = "CT-0027"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\pkgroll"
+clone_method = "git"
+task_type = "from_scratch"
+domain = "devtools_test"
+language = "ts"
+task_title = "从零创建构建产物体积分析报告模块"
+task_description = """在 `src/utils/` 下从零创建一个 `build-reporter.ts` 模块，用于在 pkgroll 构建完成后生成构建产物的分析报告。报告应统计每个输出文件的文件大小（原始大小和 gzip 压缩后大小）、文件格式、入口点来源（package.json 字段路径或 CLI 输入），并汇总总文件数和总大小。同时创建一个对应的 Rollup 插件 `src/rollup/plugins/build-reporter.ts`，在 `writeBundle` 钩子中收集信息并在所有构建完成后通过 CLI 标志 `--report` 控制是否输出。该模块需与现有的 `log.ts` 日志工具集成，使用 kolorist 进行终端着色。"""
+acceptance_criteria = [
+  "新建 src/utils/build-reporter.ts 文件，导出 formatFileSize（字节转 KB/MB）和 generateReport（接收文件路径数组返回报告数据结构）函数",
+  "新建 src/rollup/plugins/build-reporter.ts 文件，实现 Rollup Plugin 接口，在 writeBundle 钩子中收集输出文件信息（路径、大小、gzip 大小）",
+  "在 src/cli.ts 中添加 --report 布尔标志，启用时在构建完成后打印格式化的文件清单表格（含文件名、格式、大小列）",
+  "新建 tests/specs/builds/build-reporter.ts 测试文件，包含至少 3 个测试用例验证：--report 标志启用时控制台输出包含文件大小信息、多入口点报告的完整性、不使用 --report 时无额外输出",
+]
+prompt_qwen = """帮 pkgroll 加一个构建完成后的产物体积分析报告功能"""
+followups_qwen = [
+  "先在 src/utils/ 下写 build-reporter.ts，实现 formatFileSize 把字节转成 KB/MB，再实现 generateReport 接收文件路径数组返回每个文件的原始大小和 gzip 压缩后大小",
+  "再写个 Rollup 插件放在 src/rollup/plugins/ 下，用 writeBundle 钩子收集输出文件信息，用 kolorist 着色输出格式化表格",
+  "在 cli.ts 加个 --report 布尔标志，只有开启时才打印报告，默认不输出",
+  "写测试放 tests/specs/builds/ 下，至少 3 个用例覆盖：--report 开启时输出含文件大小、多入口点报告完整性、不加 --report 时无额外输出",
+]
+prompt_claude = """给 pkgroll 添加一个构建报告功能，构建结束后展示每个输出文件的体积信息"""
+followups_claude = [
+  "先创建 src/utils/build-reporter.ts，导出 formatFileSize 和 generateReport 两个函数，formatFileSize 做字节到可读单位的转换，generateReport 接收文件路径列表返回含原始大小和 gzip 大小的数据",
+  "然后在 src/rollup/plugins/ 下写对应的插件文件，在 writeBundle 钩子里收集文件路径和大小，用 kolorist 着色打印格式化的表格",
+  "cli.ts 里加 --report 布尔选项，默认关闭，开启时才在构建后触发报告输出",
+  "在 tests/specs/builds/ 下新建测试文件，至少验证三个场景：启用 --report 时 stdout 包含大小信息、多入口构建的报告完整性、未启用时没有报告输出",
+]
+
+[[task]]
+id = "CT-0028"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\lottie"
+clone_method = "git"
+task_type = "enhancement"
+domain = "docs_knowledge"
+language = "html/css"
+task_title = "为各平台文档页面添加可视化平台导航标签栏与版本状态徽章"
+task_description = """Lottie 文档包含多个平台的内容（Web、Android、iOS、After Effects 等），但目前各平台页面之间仅通过侧边栏链接切换，缺乏直观的平台间导航体验。需要在 index.html 中通过 docsify 的插件钩子（hook.afterEach）注入一个固定在内容区域顶部的水平标签栏（tab bar），展示所有平台入口并高亮当前平台。每个标签旁需展示该平台 Lottie Player 的最新版本号徽章（badge），使用 CSS 实现徽章的圆角、配色和鼠标悬停的 tooltip 效果。标签栏在移动端需自动切换为可横向滚动的紧凑模式。"""
+acceptance_criteria = [
+  "在 index.html 中通过 docsify 的 hook.afterEach 钩子，在每个平台文档页面的内容顶部注入水平标签栏 HTML",
+  "标签栏包含 Web、Android、iOS、React Native、After Effects 至少 5 个平台入口，当前页面对应的标签有 active 高亮样式",
+  "每个标签旁使用 CSS 实现版本徽章（.version-badge），包含圆角、平台主题色背景（如 Android 绿、iOS 蓝）和白色文字",
+  "鼠标悬停徽章时通过纯 CSS（::after 伪元素）显示 tooltip，展示版本发布日期等附加信息",
+  "标签栏在 max-width: 768px 下切换为可横向滚动模式（overflow-x: auto），隐藏滚动条但保留滑动功能",
+  "点击标签正确导航到对应平台文档页面，使用 docsify 路由而非硬刷新",
+]
+prompt_qwen = """帮我给这个 Lottie 文档站点加一个平台导航标签栏，方便在 Web、Android、iOS 这些平台页面之间切换"""
+followups_qwen = [
+  "在 index.html 里用 docsify 的 hook.afterEach 钩子注入标签栏 HTML，包含 Web、Android、iOS、React Native、After Effects 五个入口，根据当前路由高亮对应标签，点击用 docsify 路由跳转不要硬刷新",
+  "每个标签旁边加一个版本号徽章，用 CSS 做圆角和平台主题色背景比如 Android 绿、iOS 蓝，鼠标悬停徽章时用 ::after 伪元素显示 tooltip 展示额外信息",
+  "标签栏在 768px 以下自动切换成可横向滚动的紧凑模式，用 overflow-x: auto 但把滚动条隐藏掉，保留手指滑动功能",
+]
+prompt_claude = """这个 Lottie docsify 文档站各平台页面之间切换不方便，帮我加一个固定在内容顶部的平台导航标签栏"""
+followups_claude = [
+  "用 docsify 的 hook.afterEach 在 index.html 里给每个页面内容顶部注入一个水平标签栏，放 Web、Android、iOS、React Native、After Effects 五个平台入口，当前页面的标签要有 active 高亮样式，点击标签走 docsify 路由不要整页刷新",
+  "给每个平台标签加上版本号徽章样式，CSS 实现 .version-badge 类，圆角加平台主题色背景（Android 用绿色、iOS 用蓝色）白色文字，hover 时通过纯 CSS ::after 伪元素弹出 tooltip 显示版本发布日期等附加信息",
+  "移动端适配一下，max-width: 768px 的时候标签栏切换为横向可滚动模式，overflow-x: auto，但是要隐藏滚动条视觉效果，保留触屏滑动能力",
+]
+
+[[task]]
+id = "CT-0029"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\swagger2markup"
+clone_method = "git"
+task_type = "testing-quality"
+domain = "backend_service"
+language = "java"
+task_title = "提升 swagger2markup 与 openapi2markup 模块的单元测试覆盖率与质量"
+task_description = """当前 swagger2markup 和 openapi2markup 模块的测试存在覆盖不足的问题：(1) swagger2markup 模块缺少对包含 deprecated 标记的 API 端点的转换测试；(2) openapi2markup 模块缺少对 requestBody 中 multipart/form-data 类型的测试；(3) 两个模块都缺少对空规范文件和畸形规范文件的异常处理测试。需要系统性地补充这些测试场景，同时重构已有测试中的硬编码字符串为测试资源文件引用，提高测试可维护性。需要分析 swagger2markup-core 中的公共接口，确保边界条件和异常路径都有测试覆盖。"""
+acceptance_criteria = [
+  "为 swagger2markup 模块新增至少 3 个测试用例覆盖 deprecated API 端点的转换输出",
+  "为 openapi2markup 模块新增至少 2 个测试用例覆盖 multipart/form-data 类型的 requestBody 解析",
+  "为两个模块各新增至少 2 个异常处理测试，覆盖空文件输入和 JSON/YAML 格式错误的场景",
+  "将已有测试中的内联 Swagger/OpenAPI JSON 字符串提取为 src/test/resources 目录下的独立资源文件",
+  "所有新增和重构的测试使用 ./gradlew test 执行全部通过",
+  "测试方法命名遵循 should_expectedBehavior_when_condition 格式",
+]
+prompt_qwen = """帮我把 swagger2markup 和 openapi2markup 这两个模块的单元测试好好补一下，现在覆盖率太低了"""
+followups_qwen = [
+  "先重点补两块：swagger2markup 那边加上对 deprecated 标记的 API 端点转换的测试，至少写 3 个用例；openapi2markup 那边补 requestBody 里 multipart/form-data 类型解析的测试，至少 2 个用例",
+  "两个模块都缺异常路径的测试，各加至少 2 个用例覆盖空规范文件输入和 JSON/YAML 格式错误的情况",
+  "现在已有测试里很多内联的大段 JSON 字符串，把它们都提取到 src/test/resources 下的独立文件里引用，另外测试方法命名统一改成 should_expectedBehavior_when_condition 格式",
+  "跑一下 ./gradlew test 确认所有新增和改动的测试都能通过，有报错的话修掉",
+]
+prompt_claude = """swagger2markup 和 openapi2markup 模块的单元测试覆盖不够，帮我系统性地补充完善"""
+followups_claude = [
+  "先补核心场景：swagger2markup 模块针对带 deprecated 标记的 API 端点转换写至少 3 个测试；openapi2markup 模块针对 multipart/form-data 类型的 requestBody 解析写至少 2 个测试",
+  "再补异常处理的边界测试，两个模块各写至少 2 个用例，分别测空文件和畸形 JSON/YAML 输入时的行为",
+  "把已有测试里硬编码的 Swagger/OpenAPI JSON 串抽到 src/test/resources 目录下做资源文件引用，测试方法名统一用 should_expectedBehavior_when_condition 的格式",
+  "用 ./gradlew test 跑全量测试确认都能过，失败的修复一下",
+]
+
+[[task]]
+id = "CT-0030"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\App-Store-Connect-CLI"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "mobile_app"
+language = "other"
+task_title = "解释 App Store Connect CLI 从 JWT 签名到并发 API 调度的完整认证与请求协调机制"
+task_description = """请深入阅读 apps/studio/ 下的源码，撰写一份 Markdown 技术文档，系统解释 CLI 从启动到完成一批 API 请求的完整数据流。文档需涵盖以下跨文件协作链路：(1) main.go 的启动入口如何初始化 app.go 中的 App 结构体并注册命令；(2) app_auth.go 中 JWT token 的生成流程（私钥加载 → Claims 构建 → ES256 签名 → 过期管理）以及 token 在 app_types.go 中的缓存结构；(3) app_commands.go 的命令分发如何路由到 app_apps.go / app_testflight.go / app_metadata.go 等具体处理器；(4) app_concurrency.go 与 app_threads.go 如何协调 goroutine 池、速率限制和请求合并；(5) app_helpers.go 中的响应解析和错误处理如何与上层模块交互。需配合关键代码片段和调用链流程图。"""
+acceptance_criteria = [
+  "文档清晰描述 main.go → app.go 初始化 → app_commands.go 命令注册的启动链路，包含关键结构体字段说明",
+  "文档详细说明 app_auth.go 中 JWT token 从私钥加载到 ES256 签名的完整步骤，以及 app_types.go 中 token 缓存的数据结构和过期判断逻辑",
+  "文档阐明 app_concurrency.go 的 goroutine 池管理策略和 app_threads.go 的线程调度机制，说明两者如何分工协作",
+  "文档包含从用户输入命令到 API 响应返回的端到端调用链流程图（文本格式），标注每个文件的职责边界",
+  "文档以 Markdown 格式输出，包含至少 8 处关键代码片段引用，覆盖认证、命令分发、并发调度三大模块",
+]
+prompt_qwen = """帮我看一下 apps/studio/ 下的源码，写份 Markdown 文档解释这个 CLI 从 JWT 认证到并发 API 请求调度的完整工作机制"""
+followups_qwen = [
+  "先把 main.go → app.go 的启动初始化流程和 app_auth.go 里 JWT token 生成的完整步骤讲清楚，私钥加载、Claims 构建、ES256 签名、token 缓存和过期管理都要覆盖到",
+  "再展开讲 app_concurrency.go 和 app_threads.go 的并发调度机制，goroutine 池怎么管理、速率限制怎么实现、两个文件怎么分工协作",
+  "加一个从用户输入命令到 API 响应返回的端到端调用链流程图，用文本格式画出来，标注每个文件的职责边界",
+  "关键代码片段再多引用一些，认证、命令分发、并发调度三大模块都要有，总共至少引用 8 处代码",
+]
+prompt_claude = """读一下 apps/studio/ 目录的代码，帮我写份 Markdown 技术文档，说明这个 CLI 的 JWT 签名认证和并发请求调度是怎么工作的"""
+followups_claude = [
+  "启动链路先详细写，从 main.go 初始化到 app_auth.go 的 JWT 签名全流程，包括私钥加载、Claims、ES256 签名这些步骤，token 在 app_types.go 里的缓存结构和过期判断也说清楚",
+  "并发部分展开说说，app_concurrency.go 的 goroutine 池管理和 app_threads.go 的线程调度具体怎么配合的，速率限制策略也要讲明白",
+  "画一个文本格式的端到端流程图，从命令输入经过 app_commands.go 分发到最终 API 响应返回，每个文件的职责边界标清楚",
+  "代码引用再补充完整，认证、命令分发、并发调度三块都得有关键代码片段，总数不少于 8 处",
+]
+
+[[task]]
+id = "CT-0031"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\pkgroll"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "devtools_test"
+language = "ts"
+task_title = "解释 pkgroll 的入口点解析与 Rollup 配置生成核心架构"
+task_description = """深入分析并解释 pkgroll 如何从 `package.json` 的各种字段（exports、imports、main、module、types、bin）解析构建入口点，以及如何将这些入口点转换为 Rollup 配置的完整流程。需要覆盖以下核心模块的协作关系：`get-pkg-entry-points.ts` 如何递归解析嵌套的 exports 条件映射并确定输出格式（ESM/CJS/types）；`get-source-path.ts` 如何根据输出扩展名映射回源文件并处理多种 TypeScript 扩展名的优先级；`expand-exports-wildcards.ts` 如何展开通配符模式并验证多通配符的一致性约束；`get-rollup-configs.ts` 如何按输出格式分离 Rollup 构建以避免格式不兼容问题；以及 `externalize-dependencies.ts` 插件如何根据 package.json 的依赖分类决定外部化策略。解释应以 Markdown 文档形式编写，包含数据流图和代码片段引用。"""
+acceptance_criteria = [
+  "文档清晰描述从 package.json 输入到 Rollup OutputOptions 输出的完整数据流，包含至少一个 ASCII 数据流图展示 getBuildEntryPoints → getSourcePath → getRollupConfigs 的调用链",
+  "解释 BuildOutput 类型体系（BinaryOutput、PackageMapOutput、LegacyOutput）的设计意图及各字段的含义，并说明 EntryPointValid 与 EntryPointError 的区分逻辑",
+  "解释 exports 通配符展开的算法原理，包括单通配符匹配、多通配符一致性验证、以及路径模式与文件名模式的区分处理",
+  "解释 getRollupConfigs 中按 format-distExtension 分离构建的原因（引用代码注释中提到的 top-level await 导致 CJS 构建失败的具体案例）",
+  "解释 externalizeDependencies 插件的三层判断逻辑（runtime deps → dev deps → unlisted），以及 @types 包名转换的双向映射机制",
+]
+prompt_qwen = """帮我写一份 Markdown 文档，解释 pkgroll 从 package.json 解析入口点到生成 Rollup 配置的完整流程"""
+followups_qwen = [
+  "把 BuildOutput 的类型体系讲清楚，BinaryOutput、PackageMapOutput、LegacyOutput 各自什么场景用的，EntryPointValid 和 EntryPointError 的区分逻辑也说一下",
+  "再补充 exports 通配符展开的算法原理，包括多通配符一致性验证；还有 externalizeDependencies 插件的三层判断逻辑和 @types 包名双向映射机制",
+  "给文档加个 ASCII 数据流图展示 getBuildEntryPoints → getSourcePath → getRollupConfigs 的调用链，getRollupConfigs 里按 format-distExtension 分离构建的原因也引用代码注释解释一下",
+]
+prompt_claude = """我想搞清楚 pkgroll 怎么从 package.json 的字段一步步转成 Rollup 配置的，帮我写份架构解释文档"""
+followups_claude = [
+  "详细解释一下 BuildOutput 那几个类型的设计意图和各字段含义，BinaryOutput、PackageMapOutput、LegacyOutput 分别对应什么情况，EntryPointValid 和 EntryPointError 怎么区分的",
+  "通配符展开那块算法也加上，单通配符匹配和多通配符一致性校验怎么做的；然后 externalizeDependencies 的 runtime deps → dev deps → unlisted 三层判断和 @types 包名转换也解释一下",
+  "加一个 ASCII 数据流图展示从 getBuildEntryPoints 到 getSourcePath 到 getRollupConfigs 的完整调用链，另外解释下为什么要按 format-distExtension 拆分 Rollup 构建，引用下代码里关于 top-level await 那个注释",
+]
+
+[[task]]
+id = "CT-0032"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\App-Store-Connect-CLI"
+clone_method = "git"
+task_type = "refactor-maintenance"
+domain = "mobile_app"
+language = "other"
+task_title = "重构命令注册与分发架构，将硬编码路由改为可插拔的注册表模式"
+task_description = """当前 app_commands.go 中使用大量 switch-case 或 if-else 链将命令字符串路由到 app_apps.go / app_testflight.go / app_metadata.go / app_monetization.go 中的具体处理函数，每新增一个命令都需要修改 app_commands.go 的分发逻辑，违反开闭原则且导致该文件持续膨胀。需要重构为基于注册表的插件式架构：(1) 在 app.go 中定义 Command 接口（Name / Description / Flags / Execute）和全局 CommandRegistry；(2) 各模块文件（app_apps.go / app_testflight.go / app_metadata.go / app_monetization.go）通过 init() 函数自动将自己的命令注册到 Registry；(3) app_commands.go 简化为仅从 Registry 查找并执行命令；(4) 统一各命令的错误处理和帮助信息生成逻辑。重构后需确保所有现有命令功能不变，app_test.go 和 app_concurrency_test.go 中的测试全部通过。"""
+acceptance_criteria = [
+  "app.go 中定义 Command 接口（含 Name() string / Description() string / Flags() []Flag / Execute(ctx context.Context, args []string) error）和 CommandRegistry 注册表结构",
+  "app_apps.go / app_testflight.go / app_metadata.go / app_monetization.go 各自通过 init() 函数将命令注册到全局 Registry，不再需要 app_commands.go 硬编码引用",
+  "app_commands.go 重构后仅保留 Registry 查找、命令匹配和统一错误处理逻辑，代码行数减少 50% 以上",
+  "帮助信息自动从 Registry 中所有已注册命令生成，新增命令时无需手动维护帮助文本",
+  "app_test.go 和 app_concurrency_test.go 中现有测试用例全部通过，所有命令的功能行为与重构前完全一致",
+]
+prompt_qwen = """app_commands.go 里命令分发用了一堆 switch-case，帮我重构成注册表模式，让新增命令不用改分发逻辑"""
+followups_qwen = [
+  "先在 app.go 里定义 Command 接口（Name、Description、Flags、Execute）和 CommandRegistry 结构体，要能按名称查找和遍历全部命令",
+  "现在让 app_apps.go、app_testflight.go、app_metadata.go、app_monetization.go 各自通过 init() 自动注册命令，app_commands.go 只保留从 Registry 查找执行的逻辑",
+  "帮助信息从注册表自动生成，不要手动维护。另外统一一下各命令的错误处理格式",
+  "跑一下 app_test.go 和 app_concurrency_test.go，确认所有现有测试都能通过，功能和之前一致",
+]
+prompt_claude = """帮我把 app_commands.go 的命令路由从硬编码 switch-case 改成可插拔的注册表架构"""
+followups_claude = [
+  "在 app.go 里定义好 Command 接口，包含 Name、Description、Flags、Execute 四个方法，再加一个 CommandRegistry 支持注册、按名称查找和列举所有命令",
+  "把 app_apps.go、app_testflight.go、app_metadata.go、app_monetization.go 里的命令都改成用 init() 自注册到全局 Registry，app_commands.go 精简为只做查表分发",
+  "帮助文本改成自动从 Registry 里已注册的命令生成，再把错误处理统一起来",
+  "确保 app_test.go 和 app_concurrency_test.go 全部通过，验证重构前后行为完全一致",
+]
+
+[[task]]
+id = "CT-0033"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\App-Store-Connect-CLI"
+clone_method = "git"
+task_type = "feature"
+domain = "mobile_app"
+language = "other"
+task_title = "为 TestFlight 模块新增自动化构建分发与外部测试员组管理功能"
+task_description = """当前 app_testflight.go 仅支持查看 Beta 构建列表等基础操作，缺少自动化分发和测试员管理能力。需要扩展以下功能：(1) 新增 distribute-build 命令，接收 build ID 和测试员组名称列表，通过 App Store Connect API 的 /betaGroups 和 /builds/relationships/betaGroups 端点将指定构建自动分发到多个测试员组；(2) 新增 manage-testers 子命令集（list-groups / add-tester / remove-tester），支持按邮箱批量添加或移除外部测试员；(3) 新增 build-status-watch 命令，轮询构建处理状态直到可分发，然后自动触发分发流程。需要在 app_commands.go 中注册新命令，在 app_types.go 中定义 BetaGroup / BetaTester 等数据结构，在 app_concurrency.go 中处理批量测试员操作的并发请求。"""
+acceptance_criteria = [
+  "app_testflight.go 中新增 DistributeBuild 方法，调用 /betaGroups/{id}/relationships/builds API 将构建分发到指定测试员组，支持同时分发到多个组",
+  "新增 ListBetaGroups / AddBetaTester / RemoveBetaTester 三个方法，通过 /betaTesters 端点按邮箱管理外部测试员",
+  "新增 WatchBuildStatus 方法，以可配置间隔轮询 /builds/{id} 的 processingState，状态变为 VALID 后自动触发分发",
+  "app_types.go 中新增 BetaGroup、BetaTester、BuildProcessingState 等结构体，JSON tag 与 App Store Connect API v2 响应格式匹配",
+  "app_commands.go 中注册 distribute-build、manage-testers、build-status-watch 三组命令及其 flags 定义，帮助信息完整",
+]
+prompt_qwen = """帮我扩展 TestFlight 模块，加上构建自动分发和外部测试员管理功能"""
+followups_qwen = [
+  "先定义 BetaGroup 和 BetaTester 的数据结构，JSON tag 要跟 App Store Connect API v2 的响应格式对齐，然后实现把构建分发到多个测试员组的方法",
+  "加上测试员管理功能，支持列出测试员组、按邮箱批量添加和移除外部测试员，再加个构建状态轮询，状态变成 VALID 后自动触发分发",
+  "批量测试员操作要做并发处理提高效率，然后把 distribute-build、manage-testers、build-status-watch 这些命令都注册好，flags 和帮助信息写完整",
+]
+prompt_claude = """项目的 TestFlight 功能太基础了，需要加上构建分发到测试员组和测试员管理的能力"""
+followups_claude = [
+  "先把 BetaGroup、BetaTester 这些类型定义好，要能正确反序列化 App Store Connect API v2 的响应，再实现构建分发到测试员组的功能",
+  "现在实现测试员管理：列出组、按邮箱增删测试员，还要加个轮询构建处理状态的功能，处理完成后自动分发",
+  "批量操作要用并发请求，然后注册所有新命令，包括 distribute-build、manage-testers、build-status-watch，帮助信息要完整",
+]
+
+[[task]]
+id = "CT-0034"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\linux-cachyos"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "operating_system"
+language = "shell"
+task_title = "解释CPU微架构优化脚本的自动检测与编译标志注入流程"
+task_description = """CachyOS项目包含三个协作的优化脚本：script.sh（通用）、script-v3-v4.sh（x86-64-v3/v4指令集）、script-znver4.sh（AMD Zen4架构）。请详细解释这三个脚本的工作原理：(1) script.sh如何自动检测当前CPU的微架构型号并选择对应的GCC/Clang编译标志（-march=native vs 特定型号）；(2) script-v3-v4.sh如何修改PKGBUILD和config文件以启用AVX2/AVX-512等特定指令集；(3) script-znver4.sh针对AMD Zen4的特殊优化策略；(4) 三个脚本之间的调用关系或功能分工。需要说明脚本对PKGBUILD中CFLAGS/CXXFLAGS和内核config中CONFIG_*选项的具体修改方式。"""
+acceptance_criteria = [
+  "解释script.sh中CPU微架构检测的shell实现方式（如通过/proc/cpuinfo、gcc -march=native等）",
+  "说明script-v3-v4.sh如何区分x86-64-v3和x86-64-v4级别，并列出对应的指令集差异",
+  "解释script-znver4.sh中针对AMD Zen4的特定编译优化参数及其性能意义",
+  "说明三个脚本对PKGBUILD文件中编译标志和config文件中CONFIG_*选项的具体修改方式（如sed替换模式）",
+  "描述三个脚本之间的功能分工及它们各自的适用场景",
+]
+prompt_qwen = """帮我解释一下这个CachyOS内核项目里script.sh、script-v3-v4.sh、script-znver4.sh这三个优化脚本各自干了什么，整体流程是怎样的"""
+followups_qwen = [
+  "详细说说script.sh里CPU微架构自动检测那块是怎么实现的，比如怎么判断当前CPU型号然后选对应的-march编译标志",
+  "再分析下script-v3-v4.sh怎么区分x86-64-v3和v4级别的，以及script-znver4.sh针对Zen4做了哪些特殊优化",
+  "这三个脚本对PKGBUILD里的CFLAGS和内核config里的CONFIG_*选项具体是怎么改的，用的什么sed替换模式",
+  "总结一下三个脚本的功能分工和各自适用场景，什么时候该用哪个",
+]
+prompt_claude = """解释下这个项目里三个CPU优化脚本script.sh、script-v3-v4.sh和script-znver4.sh的工作原理和协作方式"""
+followups_claude = [
+  "展开讲讲script.sh里检测CPU微架构的shell实现细节，怎么从系统信息映射到具体的GCC/Clang编译参数",
+  "分析下script-v3-v4.sh区分v3和v4指令集级别的逻辑，还有script-znver4.sh对AMD Zen4的专门优化策略",
+  "说明这些脚本修改PKGBUILD编译标志和内核config中CONFIG_*选项的具体方式，比如用了什么文本替换手段",
+  "归纳三个脚本之间的职责划分和各自的使用场景",
+]
+
+[[task]]
+id = "CT-0035"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\App-Store-Connect-CLI"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "mobile_app"
+language = "other"
+task_title = "修复 JWT Token 过期时并发 API 请求引发的竞态条件和重复刷新问题"
+task_description = """当 app_concurrency.go 中多个 goroutine 同时向 App Store Connect API 发起请求时，若 JWT token 恰好过期，多个 goroutine 会同时检测到 401 响应并各自调用 app_auth.go 中的 token 刷新逻辑，导致：(1) 同一时刻生成多个新 token，旧 token 被覆盖后部分 goroutine 仍持有已失效的中间 token，请求继续失败；(2) 在高并发场景下偶发 panic: concurrent map writes（app_types.go 中的 tokenCache map 非并发安全）。需要在 app_auth.go 中引入 sync.Once 或 singleflight 机制，确保同一过期窗口内仅执行一次 token 刷新，其余 goroutine 等待并复用新 token。同时修复 app_types.go 中 tokenCache 的并发写入问题。"""
+acceptance_criteria = [
+  "在 app_auth.go 中使用 sync.Once 或 golang.org/x/sync/singleflight 确保同一过期窗口内仅执行一次 token 刷新，其余 goroutine 阻塞等待并复用结果",
+  "将 app_types.go 中的 tokenCache 替换为 sync.Map 或加互斥锁保护，消除 concurrent map writes panic",
+  "app_concurrency.go 中并发请求收到 401 时统一走刷新-重试路径，不再各自独立刷新",
+  "在 app_auth_test.go 中新增并发刷新场景的测试用例，模拟 10 个 goroutine 同时触发 token 过期，验证仅产生 1 次刷新调用",
+  "现有 app_concurrency_test.go 中的测试用例全部通过，无回归",
+]
+prompt_qwen = """这个项目并发调 App Store Connect API 时有认证竞态 bug，多个 goroutine 会同时刷新凭据互相覆盖，帮我修一下"""
+followups_qwen = [
+  "在 app_auth.go 里用 singleflight 机制包装凭据刷新逻辑，同一过期窗口内只执行一次刷新，其他 goroutine 阻塞等待复用结果",
+  "App 结构体里 cachedKeyID 那几个认证字段的并发读写也要加保护，现在完全没锁，runASCCombinedOutput 检测到认证失败后走统一的刷新-重试路径，别让各 goroutine 各刷各的",
+  "在 app_auth_test.go 写个并发测试，开 10 个 goroutine 同时触发凭据刷新，验证只产生一次实际的刷新调用，现有 app_concurrency_test.go 的测试也不能挂",
+]
+prompt_claude = """项目里多个 goroutine 并发请求 API 时认证凭据刷新有竞态条件，会重复刷新和覆盖，帮修一下"""
+followups_claude = [
+  "用 singleflight 或类似机制确保 app_auth.go 中凭据刷新在同一过期窗口内只执行一次，其余 goroutine 等待复用结果",
+  "cachedKeyID、cachedIssuerID 这些字段读写加并发保护，现在没有任何锁，然后 runASCCombinedOutput 认证失败后统一走一条刷新-重试路径，不能每个 goroutine 独立刷新",
+  "app_auth_test.go 加个并发场景测试，模拟 10 个 goroutine 同时触发认证过期，确认只发生一次刷新，app_concurrency_test.go 里现有的测试要保持通过",
+]
+
+[[task]]
+id = "CT-0036"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\linux-cachyos"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "operating_system"
+language = "shell"
+task_title = "解释PKGBUILD中prepare()函数的补丁应用与CPU调度器选择机制"
+task_description = """CachyOS项目为Linux内核维护了多个变体（bore、bmq、eevdf、rt-bore等），每个变体的PKGBUILD中prepare()函数负责应用不同的内核补丁并选择对应的CPU调度器。请对比至少三个不同变体（如linux-cachyos-bore、linux-cachyos-bmq、linux-cachyos-eevdf）的PKGBUILD文件，详细解释：(1) prepare()函数中补丁应用的顺序与条件分支逻辑；(2) 不同调度器（BORE/BMQ/EEVDF）的选择是如何通过shell变量和sed/patch命令反映到内核config中的；(3) 各变体之间PKGBUILD的共性结构与差异点。解释需包含关键shell代码段的逐行注释。"""
+acceptance_criteria = [
+  "准确列出prepare()函数中补丁应用的完整步骤及其执行顺序",
+  "解释至少三种调度器选择分支的shell条件判断逻辑和对应的config修改命令",
+  "对比说明不同变体PKGBUILD之间的结构共性（如source数组、sha256sums、pkgver定义）与关键差异",
+  "对prepare()中涉及的sed、patch、scripts/config等关键shell命令提供逐行解释",
+  "说明补丁应用失败时的错误处理逻辑（如有）",
+]
+prompt_qwen = """帮我解读一下这个 CachyOS 内核项目各变体 PKGBUILD 里 prepare() 函数的补丁应用和调度器选择机制"""
+followups_qwen = [
+  "详细说说 source 数组里那个 case 语句的 ;;& 穿透语法是怎么回事，不同调度器分别会拉取哪些 patch 文件",
+  "再解释下 prepare() 里 scripts/config 那些命令具体干了什么，-e、-d 这些 flag 怎么把调度器选择写入内核 .config 的",
+  "对比一下 bore、bmq、eevdf 这几个变体的 PKGBUILD，它们的共性模板结构和关键差异分别是什么",
+  "prepare() 里的错误处理是怎么做的，_die 函数和那些 case 末尾的 * 通配分支起什么作用，补丁打失败了会怎样",
+]
+prompt_claude = """解释下 CachyOS 项目中不同内核变体 PKGBUILD 的 prepare() 函数，重点是补丁怎么打的、调度器怎么选的"""
+followups_claude = [
+  "展开讲讲 source 数组中 case 语句用的 ;;& 穿透逻辑，每种调度器具体会下载和应用哪些补丁文件",
+  "scripts/config -e、-d 那些命令逐行说明一下，是怎么根据不同调度器选择修改内核 config 的",
+  "对比 bore、bmq、eevdf 几个变体 PKGBUILD 的共同点和不同点，总结一下它们的模板化设计模式",
+  "_die 函数和 case 语句的 * 默认分支怎么处理无效输入的，还有补丁应用失败时有没有错误处理逻辑",
+]
+
+[[task]]
+id = "CT-0037"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\App-Store-Connect-CLI"
+clone_method = "git"
+task_type = "enhancement"
+domain = "mobile_app"
+language = "other"
+task_title = "增强应用元数据批量更新功能，支持多语言本地化和截图自动上传"
+task_description = """当前 app_metadata.go 中的元数据更新仅支持单语言、单字段逐一修改，在多区域发布场景下效率低下。需要增强为：(1) 支持从 YAML/JSON 本地化配置文件批量读取多语言元数据（appName / subtitle / description / keywords / whatsNew），一次性提交到 App Store Connect API 的 /appInfoLocalizations 端点；(2) 集成截图自动上传流程，从本地目录按 {locale}/{displayType}/ 的目录结构读取图片，通过 /appScreenshots 的三步上传协议（reserve → upload → commit）批量上传；(3) 增加 dry-run 预览模式，在不实际提交的情况下展示将要变更的字段差异。批量上传截图时需利用 app_concurrency.go 的并发能力控制上传并行度，避免触发 API 限流。"""
+acceptance_criteria = [
+  "app_metadata.go 中新增 BulkUpdateLocalizations 方法，从 YAML 或 JSON 文件解析多语言元数据并批量 PATCH 到 /appInfoLocalizations/{id}",
+  "新增 UploadScreenshots 方法，按 {locale}/{displayType}/ 目录结构扫描图片并通过 App Store Connect 的三步上传协议（POST reserve → PUT upload → PATCH commit）自动上传",
+  "截图上传利用 app_concurrency.go 的并发控制，默认并行度为 3，可通过 --parallel flag 配置，超出 API 限流时自动降速重试",
+  "新增 --dry-run flag，启用时仅输出将要变更的字段差异对比（当前值 vs 新值），不发送任何写入请求",
+  "app_types.go 中新增 LocalizationConfig / ScreenshotUploadState 等结构体，支持至少 10 种 App Store Connect 支持的 locale",
+]
+prompt_qwen = """帮我给 app_metadata.go 加上多语言元数据批量更新和截图自动上传的功能"""
+followups_qwen = [
+  "元数据要能从 YAML 或 JSON 配置文件批量读取，支持 appName、subtitle、description、keywords、whatsNew 字段，在 app_types.go 里加上对应的配置结构体，然后调用 appInfoLocalizations 接口批量 PATCH 更新",
+  "截图上传部分，按 {locale}/{displayType}/ 的目录结构扫描图片，走 App Store Connect 三步上传协议 reserve → upload → commit，用 app_concurrency.go 里的 runWithConcurrency 控制并行度，默认3并发，超限流时自动降速重试",
+  "加个 dry-run 模式，开启后只展示每个 locale 下当前值和新值的差异对比，不发任何写请求",
+  "给新增的方法写单元测试，覆盖配置文件解析、目录结构扫描和 dry-run 差异输出这几块",
+]
+prompt_claude = """给 app_metadata.go 增加批量更新多语言元数据和截图自动上传功能"""
+followups_claude = [
+  "从 YAML 或 JSON 文件解析多语言配置，包含 appName、subtitle、description、keywords、whatsNew，app_types.go 里加对应的配置结构体，批量 PATCH 到 /appInfoLocalizations/{id} 端点",
+  "实现截图自动上传，按 {locale}/{displayType}/ 目录读图片，通过 reserve → upload → commit 三步协议上传，并发用 app_concurrency.go 的 runWithConcurrency 控制，默认并行度3，触发限流时自动降速重试",
+  "增加 dry-run 功能，启用时只打印每个 locale 的字段变更差异，不发送写入请求",
+  "写测试覆盖配置文件解析、截图目录扫描逻辑、dry-run 模式的差异输出",
+]
+
+[[task]]
+id = "CT-0038"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\linux-cachyos"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "operating_system"
+language = "shell"
+task_title = "解释PKGBUILD中build()与package()函数的内核编译打包全链路"
+task_description = """PKGBUILD中的build()和package()函数定义了Linux内核从源码编译到最终安装包生成的完整流程。以linux-cachyos/PKGBUILD为主要分析对象，对比linux-cachyos-hardened/PKGBUILD和linux-cachyos-server/PKGBUILD的差异，详细解释：(1) build()函数中make olddefconfig → make -j$(nproc)的编译流程及各make目标的含义；(2) package()函数如何安装内核镜像(vmlinuz)、模块(modules_install)和头文件(headers)到$pkgdir中；(3) config文件如何在构建开始前被注入到源码树并影响编译选项；(4) 对比hardened和server变体在build()/package()中的特殊处理（如额外的安全选项或性能调优配置）。需要解释Arch Linux makepkg与PKGBUILD函数的调用关系。"""
+acceptance_criteria = [
+  "解释build()函数中每个make命令（如make olddefconfig、make -j、make modules）的作用和执行顺序",
+  "说明package()函数中内核镜像、模块和头文件的安装路径及打包逻辑",
+  "描述config文件如何被复制到内核源码树的.config位置并通过make olddefconfig合并默认值",
+  "对比hardened变体（安全加固选项如CONFIG_SECURITY_*）和server变体（性能调优如CONFIG_HZ、CONFIG_PREEMPT）的构建差异",
+  "解释makepkg工具如何依次调用PKGBUILD中的pkgver()、prepare()、build()、package()函数完成完整构建",
+]
+prompt_qwen = """帮我解释一下这个项目里 PKGBUILD 的 build() 和 package() 函数是怎么完成内核编译和打包的"""
+followups_qwen = [
+  "再详细说说 prepare() 函数里 config 文件是怎么被复制到源码树、然后通过 scripts/config 修改各种选项、最后 make prepare 生效的整个过程",
+  "对比一下 linux-cachyos、linux-cachyos-hardened 和 linux-cachyos-server 三个变体的 PKGBUILD，说说它们在调度器选择、_HZ_ticks、_preempt、LTO 这些构建选项上有什么关键差异",
+  "解释一下 makepkg 是怎么依次调用 prepare()、build()、package() 这些函数的，还有文件末尾那段 eval 和 pkgname 数组动态生成 package_xxx() 函数的机制是怎么回事",
+]
+prompt_claude = """帮我分析下这个项目 PKGBUILD 中 build() 和 package() 函数的内核编译打包全流程"""
+followups_claude = [
+  "详细讲讲 prepare() 里 cp ../config .config 之后，scripts/config 那一大堆调用是怎么逐步修改内核配置的，make prepare 和 yes \"\" | make config 又分别干了什么",
+  "把 linux-cachyos、linux-cachyos-hardened、linux-cachyos-server 三个目录的 PKGBUILD 对比一下，重点说说 _cpusched、_HZ_ticks、_preempt、_use_llvm_lto 和 _cachy_config 这些变量的默认值差异以及对构建结果的影响",
+  "讲一下 makepkg 调用 PKGBUILD 各函数的完整顺序，以及文件底部 for 循环里用 eval 和 declare -f 动态生成 package_$pkgbase 等函数的原理",
+]
+
+[[task]]
+id = "CT-0039"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\linux-cachyos"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "operating_system"
+language = "shell"
+task_title = "解释srcinfo.sh批量生成AUR元数据的跨目录协调机制"
+task_description = """CachyOS内核项目包含10个内核变体目录，每个目录都有独立的PKGBUILD。srcinfo.sh脚本负责为所有变体批量生成.SRCINFO元数据文件。请详细解释：(1) srcinfo.sh如何遍历所有内核变体目录并调用makepkg --printsrcinfo生成对应的.SRCINFO；(2) 脚本的目录遍历策略（硬编码列表还是动态发现）及错误处理机制；(3) .SRCINFO文件在Arch Linux AUR生态中的作用——它如何描述包的依赖、源码、版本等信息；(4) srcinfo.sh与PKGBUILD中pkgver()、source数组等字段的数据流关系。解释需结合Arch Linux打包系统的上下文。"""
+acceptance_criteria = [
+  "逐行解释srcinfo.sh的核心逻辑，包括目录遍历方式和makepkg调用参数",
+  "说明脚本如何处理多个变体目录（是否并行、是否有失败跳过机制）",
+  "解释.SRCINFO文件的格式结构及其各字段（pkgbase、pkgname、pkgver、depends、source等）的含义",
+  "说明.SRCINFO与PKGBUILD中同名字段的对应关系和数据提取原理",
+  "描述该脚本在CachyOS内核发布工作流中的位置和触发时机",
+]
+prompt_qwen = """帮我解释一下 srcinfo.sh 是怎么批量给所有内核变体生成 .SRCINFO 的"""
+followups_qwen = [
+  "再具体说说 updpkgsums 和 makepkg --printsrcinfo 这两个命令各自干了什么，数据是怎么从 PKGBUILD 流到 .SRCINFO 的",
+  "解释一下生成出来的 .SRCINFO 文件里面 pkgbase、pkgver、depends、source 这些字段都是什么意思，在 AUR 生态里起什么作用",
+  "分析下这个脚本用 cd .. 回退目录和完全没有错误处理会有什么潜在问题",
+  "结合 script.sh 和 tag-release.sh 说一下 srcinfo.sh 在整个 CachyOS 发布工作流里处于什么位置，一般什么时候触发",
+]
+prompt_claude = """解释下这个项目的 srcinfo.sh 脚本是怎么为各个内核变体目录批量生成 .SRCINFO 元数据文件的"""
+followups_claude = [
+  "展开讲讲 updpkgsums 和 makepkg --printsrcinfo 分别做了什么事情，PKGBUILD 里的数据是怎么被提取到 .SRCINFO 的",
+  "说明一下 .SRCINFO 文件的格式结构，里面 pkgbase、pkgver、depends、source 等字段的含义，以及它在 AUR 中的用途",
+  "脚本里用相对路径 cd .. 做目录回退，而且没有任何错误处理，这些有什么风险",
+  "结合项目里的 script.sh 和 tag-release.sh，说明 srcinfo.sh 在 CachyOS 内核发布流程中的位置和触发时机",
+]
+
+[[task]]
+id = "CT-0040"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\OnlineMooc"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "web_frontend"
+language = "python"
+task_title = "修复 custom_render.py 自定义渲染器在空数据响应时返回格式不一致导致 Vue 前端解析崩溃"
+task_description = """在线教育平台的 app_api/custom_render.py 中自定义了 DRF 的 JSONRenderer，用于统一包装 API 响应为 {code, msg, data} 格式。当 ViewSet 返回空列表（如搜索无结果）或 None 时，渲染器未对 response.data 做空值防御，导致返回的 JSON 中 data 字段为 null 而非空数组 []。Vue 前台在 Ant Design Pro 的 ProTable 组件中直接对 response.data.data 调用 .map()，触发 TypeError: Cannot read properties of null。需要在 custom_render.py 中修复空值处理逻辑，同时确保 app_api/views.py 和 app_api/app_viewset.py 中的分页响应与非分页响应都能正确通过渲染器统一格式化。"""
+acceptance_criteria = [
+  "custom_render.py 中对 response.data 为 None 或空值时，data 字段返回空数组 [] 而非 null",
+  "分页响应（含 results 键）和非分页响应（直接列表）的空数据场景均返回一致的 {code: 200, msg: 'success', data: []} 格式",
+  "错误响应（4xx/5xx）的渲染逻辑不受影响，仍正确返回错误码和错误信息",
+  "编写至少 2 个单元测试覆盖空列表和 None 两种空数据场景",
+]
+prompt_qwen = """custom_render.py 的自定义渲染器在空数据时 data 返回了 null，前端调 .map() 直接崩了，帮修下"""
+followups_qwen = [
+  "分页接口返回的数据带 results 键，空数据时也要确保格式统一返回 data: []，跟非分页的保持一致",
+  "注意别影响 4xx 和 5xx 的错误响应，还是要正常返回错误码和错误信息",
+  "写几个单元测试，至少覆盖空列表和 None 两种空数据场景",
+]
+prompt_claude = """自定义渲染器 custom_render.py 空数据响应时 data 字段是 null 而不是空数组，Vue 前端直接 TypeError 了，帮我修一下"""
+followups_claude = [
+  "分页响应里有 results 字段的情况也处理下，空数据时也统一返回 data: []，和非分页响应格式一致",
+  "错误响应（4xx/5xx）的渲染逻辑别改坏了，要保持原来的错误码和错误信息格式",
+  "加几个单元测试，分别测试 response.data 为 None 和空列表两种场景",
+]
+
+[[task]]
+id = "CT-0041"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\OnlineMooc"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "web_frontend"
+language = "python"
+task_title = "修复 no_csrf.py 中间件对 multipart/form-data 文件上传请求的 CSRF 豁免失效导致 403 错误"
+task_description = """在线教育平台的 onlinemooc/no_csrf.py 实现了一个自定义 CSRF 豁免中间件，用于对 API 接口路径（/api/ 前缀）跳过 CSRF 校验，以便 Vue 前端通过 JWT Token 认证的方式调用接口。但当前实现仅通过 request.path 前缀匹配来决定是否豁免。在用户上传头像或课程封面图片时，前端发送 multipart/form-data 格式的 POST 请求到 /api/upload/ 接口，Django 在 CSRF 中间件执行前会先解析 multipart body，此时如果请求头中缺少 CSRF token，Django 的 CsrfViewMiddleware 会在 no_csrf 中间件之前就返回 403。需要修复中间件的执行顺序或实现方式，确保所有 /api/ 前缀的请求（包括文件上传）都能正确豁免 CSRF 校验，同时非 API 路径（如 Django Admin）仍保持 CSRF 保护。"""
+acceptance_criteria = [
+  "所有 /api/ 前缀路径的 POST/PUT/PATCH 请求（含 multipart/form-data）均不触发 CSRF 403 错误",
+  "非 /api/ 前缀路径（如 /xadmin/）仍保持 CSRF 校验保护",
+  "no_csrf.py 使用 csrf_exempt 装饰器或正确覆盖 process_request 方法，在 CSRF 校验前完成豁免判断",
+  "settings/base.py 中 MIDDLEWARE 顺序正确，no_csrf 中间件位于 CsrfViewMiddleware 之前",
+  "通过 curl 或测试用例验证：不带 CSRF token 的 multipart POST 到 /api/upload/ 返回 200 而非 403",
+]
+prompt_qwen = """前端上传图片到 /api/upload/ 时返回 403，no_csrf.py 的 CSRF 豁免对 multipart 请求没生效，帮我修一下"""
+followups_qwen = [
+  "确保修复后所有 /api/ 开头的 POST、PUT、PATCH 请求都能正确豁免 CSRF，不只是普通表单提交",
+  "非 API 路径比如 /xadmin/ 的 CSRF 保护不能受影响，帮确认一下没有误伤",
+  "写几个测试用例，分别验证 multipart 文件上传、普通 POST 到 /api/ 路径不触发 403，以及非 API 路径仍然有 CSRF 校验",
+]
+prompt_claude = """用户上传头像到 /api/upload/ 接口报 CSRF 403 错误，应该是 no_csrf.py 中间件对文件上传请求的豁免失效了，帮看看怎么修"""
+followups_claude = [
+  "修复要覆盖所有 /api/ 前缀路径的 POST、PUT、PATCH 请求，包括 multipart/form-data 类型的都不能报 403",
+  "帮确认 /xadmin/ 这些非 API 路径的 CSRF 校验没有被破坏",
+  "加几个测试，测带文件上传的和不带文件的 API POST 请求都正常，同时测非 API 路径的 CSRF 保护还在",
+]
+
+[[task]]
+id = "CT-0042"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\OnlineMooc"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "web_frontend"
+language = "python"
+task_title = "修复 custom_exception.py 异常处理器未捕获 DRF 嵌套字段 ValidationError 导致前端收到原始 500 错误"
+task_description = """onlinemooc/custom_exception.py 中自定义了 DRF 的 exception_handler，用于统一格式化错误响应为 {code, msg, detail} 结构。但当 app_api/serializers.py 中的嵌套序列化器（如课程包含章节列表）校验失败时，DRF 抛出的 ValidationError 的 detail 是嵌套的 OrderedDict（如 {chapters: [{title: ['该字段不能为空']}]}），当前异常处理器尝试对 detail 直接做 str() 转换或只处理了扁平列表格式，导致嵌套错误信息丢失或触发 TypeError 后 fallback 到 Django 默认的 500 响应。前端 Vue 收到 500 后无法展示具体的字段校验错误信息。需要递归解析嵌套的 ValidationError detail，将多层嵌套的字段错误扁平化为可读的错误消息列表返回给前端。"""
+acceptance_criteria = [
+  "custom_exception.py 能正确处理 DRF ValidationError 的三种 detail 格式：字符串、列表、嵌套字典（含多层嵌套）",
+  "嵌套字段错误被扁平化为 'chapters[0].title: 该字段不能为空' 格式的可读消息列表",
+  "错误响应统一为 {code: 400, msg: '参数校验失败', detail: ['错误1', '错误2']} 格式，HTTP 状态码为 400",
+  "settings/base.py 中的 REST_FRAMEWORK.EXCEPTION_HANDLER 正确指向修复后的处理函数",
+  "编写至少 3 个测试用例分别覆盖扁平字段错误、单层嵌套错误和多层嵌套错误场景",
+]
+prompt_qwen = """DRF 嵌套序列化器校验失败时，custom_exception.py 里的异常处理器没处理好嵌套的 ValidationError，前端直接收到 500 了，帮我修一下"""
+followups_qwen = [
+  "把嵌套的 detail 递归扁平化，输出格式用 'chapters[0].title: 该字段不能为空' 这种带路径的可读消息列表，同时兼容字符串、列表、嵌套字典三种 detail 格式",
+  "统一错误响应结构为 {code: 400, msg: '参数校验失败', detail: [...]} 格式，确认 settings 里 REST_FRAMEWORK 的 EXCEPTION_HANDLER 指向正确",
+  "写至少 3 个测试用例，分别覆盖扁平字段错误、单层嵌套和多层嵌套的场景",
+]
+prompt_claude = """custom_exception.py 里自定义的异常处理器碰到嵌套序列化器的 ValidationError 就挂了，前端收到 500 看不到具体校验错误，帮修下"""
+followups_claude = [
+  "递归解析嵌套的 ValidationError detail，扁平化成 'chapters[0].title: 该字段不能为空' 这样的路径格式，字符串、列表、嵌套字典三种 detail 类型都要能处理",
+  "响应统一返回 {code: 400, msg: '参数校验失败', detail: [...]}，检查下 settings 中 EXCEPTION_HANDLER 配置是否正确指向了修复后的函数",
+  "补充测试用例，至少 3 个，覆盖扁平字段校验错误、单层嵌套错误、多层嵌套错误这三种情况",
+]
+
+[[task]]
+id = "CT-0043"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\OnlineMooc"
+clone_method = "git"
+task_type = "feature"
+domain = "web_frontend"
+language = "python"
+task_title = "为课程列表 API 新增多条件组合筛选与价格区间过滤功能"
+task_description = """当前在线教育平台的 app_api/filters.py 中仅实现了基础的关键字搜索。前端 Vue 页面需要支持用户按课程分类、难度等级、价格区间（最低价-最高价）和讲师进行多条件组合筛选。需要在 app_api/filters.py 中使用 django-filter 的 FilterSet 为课程模型创建组合过滤器，支持价格区间的 RangeFilter；在 app_api/serializers.py 中确保筛选字段在响应中正确序列化；在 app_api/app_viewset.py 或 views.py 中将 FilterSet 挂载到对应的课程 ViewSet；同时在 app_api/urls.py 中确保筛选参数能通过 query string 正确传递。"""
+acceptance_criteria = [
+  "filters.py 中新建课程 FilterSet，包含 category（精确匹配）、level（精确匹配）、price_min/price_max（RangeFilter 区间过滤）、teacher（外键关联）字段",
+  "价格区间过滤支持仅传 price_min 或仅传 price_max 的单边过滤",
+  "多个筛选条件可自由组合，结果取交集",
+  "课程 ViewSet 正确引用 filterset_class，GET /api/courses/?category=1&price_min=50&price_max=200 返回正确的筛选结果",
+  "筛选参数无效（如 price_min=abc）时返回 400 错误而非 500",
+]
+prompt_qwen = """帮我给课程列表 API 加上按分类、难度、价格区间和讲师的多条件组合筛选，用 django-filter 实现"""
+followups_qwen = [
+  "价格区间过滤要支持只传最低价或只传最高价的单边查询，确保这块逻辑没问题",
+  "处理一下非法参数的情况，比如 price_min=abc 这种要返回 400 而不是 500",
+  "给筛选功能写几个测试，覆盖组合条件查询和异常参数的场景",
+]
+prompt_claude = """课程列表 API 要支持多条件组合筛选，分类、等级、价格区间、讲师都要能过滤，用 django-filter 来做"""
+followups_claude = [
+  "价格过滤需要支持单边的，比如只传 price_min 不传 price_max 也能正常返回结果",
+  "筛选参数传无效值的时候别报 500 了，做下校验返回 400",
+  "补上测试用例，测一下多条件组合和参数异常的情况",
+]
+
+[[task]]
+id = "CT-0044"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\OnlineMooc"
+clone_method = "git"
+task_type = "enhancement"
+domain = "web_frontend"
+language = "python"
+task_title = "优化分页器支持前端动态 page_size 并增加总数缓存以提升大数据集分页性能"
+task_description = """当前 onlinemooc/pagination.py 中使用的 PageNumberPagination 硬编码了 page_size，前端 Ant Design Pro 的 ProTable 组件切换每页条数时无法生效。同时在课程数据量较大时，每次分页请求都执行 COUNT(*) 查询导致响应缓慢。需要增强 pagination.py 支持前端通过 query 参数动态传入 page_size（设置合理上限防止滥用），修改响应格式使其包含 total、current_page、page_size 等前端 ProTable 需要的分页元数据。还需要在 app_api/app_viewset.py 中为高频访问的课程列表接口添加 COUNT 查询结果的短期缓存（如 Django cache framework），减少数据库压力。"""
+acceptance_criteria = [
+  "pagination.py 支持通过 ?page_size=N 参数动态设置每页条数，最大值限制为 100",
+  "分页响应中包含 total、current_page、page_size、total_pages 四个元数据字段",
+  "custom_render.py 的统一响应格式正确嵌套分页元数据，前端可直接读取",
+  "课程列表 ViewSet 对 COUNT 查询结果使用 Django cache 缓存，TTL 不超过 60 秒",
+  "settings/base.py 中正确配置 CACHES 后端（LocMemCache 或 Redis）",
+]
+prompt_qwen = """这个项目的分页器不支持前端动态切换每页条数，而且大数据量分页时 COUNT 查询太慢，帮我优化一下"""
+followups_qwen = [
+  "改一下 pagination.py 里的 CustomPageNumberPagination，加上 max_page_size 限制最大100，然后 get_paginated_response 返回的数据里要有 total、current_page、page_size、total_pages 四个字段，AppPageNumberPagination 也一起改了",
+  "custom_render.py 的 MyJSONRenderer 会把所有响应再包一层 code 和 msg，但分页器自己已经返回了带 code 的结构，这样会双层嵌套。改一下让分页数据经过渲染器时格式正确，前端能直接读到分页元数据",
+  "在 LessonViewSet 的课程列表查询里用 Django cache 给 COUNT 结果加个短期缓存，TTL 设 60 秒以内，然后在 settings/base.py 里加上 CACHES 配置，用 LocMemCache 就行",
+]
+prompt_claude = """项目里的分页器 page_size 是写死的，前端 ProTable 切换每页条数没效果，顺便大数据量分页的 COUNT 查询也需要加个缓存"""
+followups_claude = [
+  "pagination.py 的 CustomPageNumberPagination 要设 max_page_size 为 100 防滥用，get_paginated_response 里补上 total、current_page、page_size、total_pages 这四个分页元数据，app_page.py 的 AppPageNumberPagination 也同步改一下",
+  "现在 custom_render.py 的 MyJSONRenderer 统一包了一层 {code, msg, data}，但是分页响应本身也带了 code，会出现嵌套冲突。处理一下渲染器让分页数据和非分页数据都能正确输出，前端拿到的格式要统一",
+  "给 views.py 里的 LessonViewSet 列表接口加上 COUNT 查询的 Django cache 缓存，过期时间不超过 60 秒，settings/base.py 里配一下 CACHES 用 LocMemCache",
+]
+
+[[task]]
+id = "CT-0045"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\airflow-tutorial"
+clone_method = "git"
+task_type = "enhancement"
+domain = "data_engineering"
+language = "sql"
+task_title = "增强 Sakila 数据仓库 SQL 模型：添加 BigQuery 分区表与汇总视图"
+task_description = """当前 meta/sakila-database.sql 仅包含原始 OLTP 表结构，直接导入 BigQuery 后查询效率低下。需要在 meta/ 目录下新增 sakila-bigquery-views.sql 文件，为 rental、payment 等高频查询表创建按日期分区的建表语句（使用 BigQuery SQL 方言），并编写聚合视图（如每日营收汇总、热门影片排名、客户活跃度），同时修改 dags/sakila_main_tables.py 中的 DAG 使其在数据加载完成后自动执行视图刷新任务。需要确保新增 SQL 与现有 sakila-database.sql 中的表名和字段名保持一致。"""
+acceptance_criteria = [
+  "新增 meta/sakila-bigquery-views.sql 文件，包含至少 3 个基于 rental/payment 表的 BigQuery 分区建表语句（使用 PARTITION BY DATE 语法）",
+  "包含至少 3 个聚合视图的 CREATE VIEW 语句（每日营收、热门影片 TOP-N、客户活跃度），SQL 语法符合 BigQuery 标准方言",
+  "视图中引用的所有表名和字段名与 sakila-database.sql 中的原始定义完全对应",
+  "dags/sakila_main_tables.py 中新增视图刷新任务节点，并正确设置在数据加载任务之后执行的依赖关系",
+]
+prompt_qwen = """帮我给这个 Airflow 项目加一套 BigQuery 的分区表和聚合视图，主要针对 sakila 数据库里的高频查询表"""
+followups_qwen = [
+  "在 meta/ 下新建一个 sakila-bigquery-views.sql，先把 rental、payment 这些表写成按日期分区的 BigQuery 建表语句，用 PARTITION BY DATE 语法",
+  "再加几个聚合视图：每日营收汇总、热门影片 TOP-N 排名、客户活跃度统计，SQL 要用 BigQuery 方言",
+  "改一下 dags/sakila_main_tables.py，加一个视图刷新的任务节点，设成数据加载完之后再执行",
+  "检查一下新 SQL 里引用的表名和字段名，要和 meta/sakila-database.sql 里的原始定义完全对得上",
+]
+prompt_claude = """这个项目把 sakila 数据导入 BigQuery 后查询太慢了，帮我加上分区表和汇总视图"""
+followups_claude = [
+  "在 meta/ 目录下创建 sakila-bigquery-views.sql，给 rental、payment 等表写 BigQuery 分区建表语句，按日期分区",
+  "然后写三个聚合视图：每日营收、热门影片排名、客户活跃度，用 BigQuery 标准 SQL",
+  "把 dags/sakila_main_tables.py 也改一下，新增视图刷新任务，依赖关系设在数据加载任务之后",
+  "核对一遍所有视图里的表名和字段名，确保跟 meta/sakila-database.sql 的定义一致",
+]
+
+[[task]]
+id = "CT-0046"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\airflow-tutorial"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "data_engineering"
+language = "sql"
+task_title = "解释 crypto.sql 与 eth_rates DAG 之间的端到端数据流转与 SQL 转换逻辑"
+task_description = """项目中 meta/crypto.sql 定义了加密货币数据的表结构，dags/eth_rates.py 负责获取 ETH 汇率数据并写入数据库，dags/mysql_to_gcs.py 则将 MySQL 数据搬运到 GCS。请在 docs/ 目录下新建 crypto_pipeline_explanation.md 文档，详细解释以下内容：(1) crypto.sql 中每张表的字段含义、主键设计与索引策略；(2) eth_rates.py 中的 SQL 插入/更新语句如何与表结构对应；(3) mysql_to_gcs.py 中抽取 SQL 的 WHERE 条件和字段映射逻辑；(4) 数据从 MySQL 经 GCS 到 BigQuery 的完整流转路径，标注每一步涉及的 SQL 操作和数据格式转换。文档中需包含数据流图（使用 Mermaid 语法）。"""
+acceptance_criteria = [
+  "docs/crypto_pipeline_explanation.md 中逐字段解释了 crypto.sql 中所有表的结构定义，包含字段类型、约束和设计意图",
+  "文档清晰描述 eth_rates.py 中的 SQL 语句（INSERT/UPDATE/UPSERT）如何映射到 crypto.sql 中的表，并标注参数化变量的来源",
+  "文档解释 mysql_to_gcs.py 的抽取 SQL 中 WHERE 过滤条件的业务含义和字段选择逻辑",
+  "包含至少一个 Mermaid 数据流图，展示数据从 MySQL → GCS → BigQuery 的完整路径及每步涉及的 SQL 操作",
+]
+prompt_qwen = """帮我看一下这个项目里 crypto 相关的数据流转逻辑，在 docs/ 下写个文档解释清楚"""
+followups_qwen = [
+  "把 meta/crypto.sql 里每张表的字段含义、主键和索引策略都详细说明一下",
+  "再分析一下 eth_rates.py 和 mysql_to_gcs.py 里的 SQL 语句是怎么跟表结构对应的，WHERE 条件的业务含义也解释清楚",
+  "加一个 Mermaid 数据流图，把数据从 MySQL 到 GCS 再到 BigQuery 的完整路径画出来，标注每步涉及的 SQL 操作和数据格式转换",
+]
+prompt_claude = """这个项目有 crypto 数据的处理流程，帮我在 docs/ 下写一份解释文档"""
+followups_claude = [
+  "详细解释一下 crypto.sql 里各表的字段定义、类型约束、主键设计和索引选择",
+  "补充 eth_rates.py 的写入 SQL 和 mysql_to_gcs.py 的抽取 SQL 跟表结构的映射关系，把过滤条件的意图也说明白",
+  "用 Mermaid 语法画个端到端的数据流图，展示数据从 MySQL 经 GCS 到 BigQuery 每一步做了什么操作和格式变化",
+]
+
+[[task]]
+id = "CT-0047"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\airflow-tutorial"
+clone_method = "git"
+task_type = "testing-quality"
+domain = "data_engineering"
+language = "sql"
+task_title = "为 SQL 数据管道添加端到端数据质量校验测试套件"
+task_description = """当前项目缺少对 SQL 数据管道正确性的自动化测试。需要创建一个完整的测试套件来验证：(1) meta/sakila-database.sql 和 meta/crypto.sql 中的 DDL 语句语法正确且可在 MySQL 中执行；(2) dags/ 下各 DAG 文件中嵌入的 SQL 查询语法正确、字段名与源表 DDL 一致；(3) 模拟数据场景下的 SQL 查询结果正确性（如聚合计算、JOIN 关系、NULL 处理）。测试应使用 SQLite 或内存数据库模拟 MySQL 环境，通过 pytest 驱动，在 tests/ 目录下创建 test_sql_quality.py。需要覆盖边界场景：空表查询、全 NULL 列、特殊字符转义、日期边界值。"""
+acceptance_criteria = [
+  "tests/test_sql_quality.py 中包含至少 3 个测试用例验证 meta/*.sql 的 DDL 语句可被 SQL 引擎成功解析执行",
+  "包含至少 3 个测试用例验证 dags/ 中嵌入的 SELECT 查询的字段名与对应 DDL 中的列定义一致",
+  "包含至少 4 个边界场景测试：空表查询返回空结果集、全 NULL 列的聚合行为、特殊字符（引号/反斜杠）转义、日期边界值（如 '0000-00-00'）",
+  "所有测试使用 SQLite 内存数据库或 pytest fixture 模拟，无需外部 MySQL 实例即可运行",
+  "pytest 执行 tests/test_sql_quality.py 全部通过且无警告",
+]
+prompt_qwen = """帮这个 Airflow 数据管道项目写一套 SQL 数据质量校验的自动化测试"""
+followups_qwen = [
+  "先在 tests/test_sql_quality.py 里用 SQLite 内存数据库验证 meta/sakila-database.sql 和 meta/crypto.sql 的建表语句能正确解析执行，注意这俩文件分别是 MySQL 和 PostgreSQL 语法，需要做适配转换",
+  "再加几个测试校验 dags/ 下各 DAG 文件里嵌入的 SQL 查询字段名是否跟对应 DDL 表定义的列一致，比如 eth_rates.py 里的 INSERT 语句和 sakila_main_tables.py 里的 SELECT 语句",
+  "补充边界场景测试：空表查询返回空结果集、全 NULL 列的聚合行为、含引号反斜杠的特殊字符转义、日期边界值处理",
+  "跑一下 pytest tests/test_sql_quality.py 确保全部通过没有警告",
+]
+prompt_claude = """给这个 Airflow 项目的 SQL 数据管道加个端到端的数据质量测试套件"""
+followups_claude = [
+  "在 tests/test_sql_quality.py 中用 SQLite 内存数据库测试 meta/sakila-database.sql 和 meta/crypto.sql 里的 DDL 建表语句能否正确解析和执行，两个文件分别是 MySQL 和 PostgreSQL 方言，要做语法适配",
+  "加测试验证 dags/ 里各 DAG 嵌入的 SQL 语句字段名与对应 DDL 中的列定义一致，覆盖 eth_rates.py 的 INSERT 和 sakila_main_tables.py 的 SELECT",
+  "加上边界场景的测试用例：空表查询、全 NULL 列聚合、特殊字符（引号和反斜杠）转义、日期边界值",
+  "执行 pytest tests/test_sql_quality.py 确认全部通过且无警告",
+]
+
+[[task]]
+id = "CT-0048"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\airflow-tutorial"
+clone_method = "git"
+task_type = "feature"
+domain = "data_engineering"
+language = "sql"
+task_title = "新增基于 SQL 水位线的增量数据同步功能"
+task_description = """当前 dags/mysql_to_gcs.py 每次执行全量抽取所有表的数据，随着 sakila 数据库数据量增长，全量同步耗时过长。需要实现基于 SQL 水位线（watermark）的增量抽取功能：(1) 在 meta/ 目录下新增 watermark.sql，创建一张 sync_watermark 表记录每张源表的最后同步时间戳；(2) 修改 dags/mysql_to_gcs.py 中的抽取 SQL，在 WHERE 子句中根据水位线只查询增量数据（如 WHERE last_update > '{{last_watermark}}'）；(3) 在 DAG 末尾新增任务更新水位线记录；(4) 新增 dags/full_refresh.py DAG 用于手动触发全量重刷，该 DAG 会重置水位线并执行全量同步。需要兼容 sakila 数据库中无 last_update 字段的表（如 film_text），对这些表保持全量同步策略。"""
+acceptance_criteria = [
+  "meta/watermark.sql 中定义了 sync_watermark 表，包含 table_name（主键）、last_sync_ts、sync_mode 等字段",
+  "dags/mysql_to_gcs.py 的抽取 SQL 对含 last_update 字段的表使用增量 WHERE 条件，对无该字段的表保持全量模式",
+  "每次增量同步完成后自动更新 sync_watermark 表中对应记录的 last_sync_ts",
+  "新增 dags/full_refresh.py DAG 支持手动触发全量重刷，包含重置水位线的 SQL 任务",
+  "增量抽取的 SQL 使用参数化查询（Airflow 模板变量或宏），避免 SQL 注入风险",
+]
+prompt_qwen = """帮我给这个 Airflow 项目加上增量同步，现在 mysql_to_gcs.py 每次都全量抽数据太慢了"""
+followups_qwen = [
+  "在 meta/ 下新建一个 watermark.sql，建一张 sync_watermark 表记录每张表的最后同步时间戳，然后修改抽取 SQL 加上 WHERE last_update > 水位线的增量条件，同步完成后自动更新水位线",
+  "sakila 里有些表没有 last_update 字段比如 film_text，这些表得保持全量同步，在水位线表里加个 sync_mode 字段区分增量和全量",
+  "再加一个 dags/full_refresh.py DAG，可以手动触发全量重刷，先重置水位线再做全量同步",
+  "增量 SQL 里的水位线值要用 Airflow 模板变量或参数化查询传入，别直接拼字符串，防止注入",
+]
+prompt_claude = """这个 Airflow 项目的 mysql_to_gcs DAG 每次全量抽数据，量大了以后太慢，帮我改成增量同步"""
+followups_claude = [
+  "在 meta/ 目录下加个 watermark.sql 文件，定义一张 sync_watermark 表存每张源表的最后同步时间戳，然后改 DAG 的抽取 SQL 加 WHERE 增量条件，每次同步完更新水位线记录",
+  "有些 sakila 表没有 last_update 列，像 film_text 这种，要对这类表保持全量抽取策略，水位线表里用一个 sync_mode 字段来标记区分",
+  "新增一个 dags/full_refresh.py DAG 支持手动触发全量重刷，流程是先把水位线重置再执行全量同步",
+  "增量查询的水位线参数要用 Airflow 的模板变量或参数化方式传递，不要直接拼 SQL 字符串，避免注入风险",
+]
+
+[[task]]
+id = "CT-0049"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\dataforge-core"
+clone_method = "git"
+task_type = "enhancement"
+domain = "data_engineering"
+language = "sql"
+task_title = "增强 stats 命令支持 SQL 风格的过滤表达式和自定义维度聚合"
+task_description = """当前 stats.py 的统计分析功能固定（只能按 stage 分组统计 done/failed/pending 和按 model 聚合 passrate），无法进行灵活的条件过滤和自定义维度分析。例如用户想查看「task_type=bug-fix 且 language=python 的任务中 qwen passrate 的分布」或「按 domain 分组统计 threshold 通过率」时需要手动编写脚本。请增强 stats 命令，新增 --filter 和 --group-by 参数，支持 SQL 风格的数据分析：(1) 在 ctpipe/stats.py 中新增 _parse_filter_expr(expr: str) 函数，将类 SQL 的 WHERE 表达式（如 "task_type = 'bug-fix' AND qwen_passrate < 0.5"）解析为 Python 过滤谓词，支持 =、!=、<、>、<=、>=、AND、OR 运算符以及字符串和数值字面量；(2) 新增 --group-by 参数，支持按 task_type、domain、language、bad_pattern 等 TaskConfig 字段分组，每组独立计算 passrate 统计（min/max/mean/count）；(3) 分组统计的结果需要同时支持 table 和 json 两种输出格式；(4) 在 cli.py 中为 stats 子命令添加 --filter 和 --group-by 参数；(5) 过滤和分组需要联合 config.py 的 TaskConfig 元数据和 state.py 的 pipeline_state 数据，实现跨数据源的 SQL 风格 JOIN 语义。过滤表达式解析器必须使用白名单字段列表防止注入。"""
+acceptance_criteria = [
+  "stats.py 中新增 _parse_filter_expr 函数，能将 \"task_type = 'bug-fix' AND qwen_passrate < 0.5\" 解析为可调用的过滤函数",
+  "过滤器支持 =、!=、<、>、<=、>= 六种比较运算符和 AND、OR 两种逻辑运算符",
+  "过滤器使用白名单验证字段名（仅允许 task_type、domain、language、bad_pattern、qwen_passrate、claude_passrate 等预定义字段），非法字段名抛出 ValueError",
+  "cli.py 中 stats 子命令新增 --filter 和 --group-by 两个可选参数",
+  "--group-by 支持按 task_type、domain、language 分组，每组输出独立的 passrate min/max/mean/count 统计",
+  "table 格式输出按分组排列，每组有清晰的标题行和统计汇总行",
+  "json 格式输出包含 groups 数组，每个元素有 group_key、group_value、passrate_stats 字段",
+  "--filter 和 --group-by 可以组合使用（先过滤再分组）",
+  "新增 tests/test_stats_filter.py 包含至少 4 个测试用例：纯过滤、纯分组、组合使用、非法字段名拒绝",
+]
+prompt_qwen = """帮我给 stats 命令加上 --filter 和 --group-by 参数，支持类 SQL 的条件过滤和按字段分组聚合 passrate 统计"""
+followups_qwen = [
+  "在 stats.py 里实现一个 _parse_filter_expr 函数，把类似 \"task_type = 'bug-fix' AND qwen_passrate < 0.5\" 的字符串解析成可调用的过滤函数，支持 =、!=、<、>、<=、>= 比较和 AND、OR 逻辑组合，需要联合 TaskConfig 的元数据字段和 finalize state 里的 passrate 数据",
+  "--group-by 要支持按 task_type、domain、language 这些 TaskConfig 字段分组，每组独立算 passrate 的 min/max/mean/count，table 格式每组要有标题行和汇总行，json 格式输出 groups 数组每个元素包含 group_key、group_value、passrate_stats",
+  "过滤器的字段名必须用白名单校验，只允许 task_type、domain、language、bad_pattern、qwen_passrate、claude_passrate 这些预定义字段，遇到非法字段名要抛 ValueError，防止表达式注入",
+  "新建 tests/test_stats_filter.py，至少写 4 个测试：纯 --filter 过滤、纯 --group-by 分组、两者组合使用、非法字段名拒绝",
+]
+prompt_claude = """stats 命令现在只能看整体统计，我想加 --filter 和 --group-by 两个参数，能用类 SQL 表达式过滤任务、按字段分组做 passrate 聚合分析"""
+followups_claude = [
+  "实现过滤表达式解析核心：在 stats.py 新增 _parse_filter_expr 函数，输入类似 \"task_type = 'bug-fix' AND qwen_passrate < 0.5\" 的字符串，返回一个可调用的过滤谓词，要支持六种比较运算符和 AND/OR 逻辑运算，过滤时需要合并 TaskConfig 字段和 finalize state 里的 passrate 数据",
+  "实现 --group-by 分组统计：支持按 task_type、domain、language 分组，每组算 passrate 的 min/max/mean/count，同时支持 table 和 json 两种输出格式，table 要有分组标题和汇总行，json 要输出结构化的 groups 数组",
+  "加上字段名白名单校验，只允许 task_type、domain、language、bad_pattern、qwen_passrate、claude_passrate 等预定义字段出现在过滤表达式里，非法字段名直接抛 ValueError",
+  "写 tests/test_stats_filter.py 测试文件，至少覆盖四个场景：单独过滤、单独分组、过滤加分组组合、非法字段名报错",
+]
+
+[[task]]
+id = "CT-0050"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\dataforge-core"
+clone_method = "git"
+task_type = "documentation"
+domain = "data_engineering"
+language = "sql"
+task_title = "为 pipeline 数据模型编写 SQL DDL 数据字典与 ER 关系文档"
+task_description = """ctpipe 的核心数据分布在 pipeline_state.json（嵌套 JSON）、submission.csv（扁平 CSV）、quality.toml（评分结构）和 tasks.toml（任务配置）四种异构格式中，缺乏统一的数据字典。请阅读 config.py（SUBMISSION_FIELDNAMES、TaskConfig、BatchConfig 数据类定义）、state.py（PipelineState 的嵌套 task→stage→model 三级结构）、toml_utils.py（Criterion 数据结构与 calc_passrate 公式）和 finalize.py（SUBMISSION_KEY_MAP 字段映射与 passrate 阈值写入逻辑），编写一份完整的 SQL DDL 数据字典文档，输出到 docs/data_dictionary.sql。要求：(1) 将所有数据结构规范化为至少 5 张关系表（tasks、pipeline_stages、scoring_criteria、submissions、batch_config），使用 CREATE TABLE 语句定义，包含完整的列类型、NOT NULL 约束、主键和外键关系；(2) 用 SQL COMMENT 注释说明每列的来源文件和字段映射（如 submissions.qwen_passrate 来自 finalize.py 的 calc_passrate 计算结果）；(3) 编写 3 个 CREATE VIEW 语句：passrate_comparison（对比 qwen/claude passrate 及其差值）、threshold_violations（筛选不满足 4 条阈值规则的任务）、stage_progress（各阶段 done/failed/pending 统计）；(4) 在文档头部用 SQL 注释块绘制表间关系的 ASCII ER 图。"""
+acceptance_criteria = [
+  "docs/data_dictionary.sql 文件存在，内容为合法的 SQL（可被 SQLite 或 PostgreSQL 解析无语法错误）",
+  "包含至少 5 张 CREATE TABLE 语句，每张表有主键定义，表间通过 FOREIGN KEY 建立引用关系",
+  "tasks 表的列集合完整覆盖 TaskConfig 的所有字段（id, project_path, clone_method, task_type, domain, language, task_title, task_description 等）",
+  "pipeline_stages 表正确反映 state.py 中 task→stage→model 的三级嵌套结构，包含 task_id, stage, model, status, retry_count 等列",
+  "scoring_criteria 表包含 Criterion 数据类的全部 7 个字段（name, description, type, points, weight, score, rationale）",
+  "passrate_comparison 视图使用 SQL 聚合函数实现 calc_passrate 公式 SUM(score * weight) / SUM(points * weight)",
+  "threshold_violations 视图的 WHERE 条件精确对应 config.py 中 check_passrate_thresholds 的 4 条规则",
+  "文档头部包含 ASCII ER 图，标注所有表及其主要关联关系",
+]
+prompt_qwen = """帮我把 ctpipe 里分散的数据结构整理成一份 SQL DDL 数据字典，输出到 docs/data_dictionary.sql"""
+followups_qwen = [
+  "把 TaskConfig、PipelineState、Criterion、BatchConfig 这些结构规范化成至少 5 张关系表，CREATE TABLE 要有完整列类型、NOT NULL、主键和外键，submissions 表的列要覆盖 SUBMISSION_FIELDNAMES 里所有字段",
+  "加三个视图：passrate_comparison 对比两个模型 passrate 及差值，threshold_violations 按 check_passrate_thresholds 的四条规则筛选违规任务，stage_progress 统计各阶段 done/failed/pending 数量",
+  "文件开头用 SQL 注释块画一个 ASCII ER 图标注所有表和关联关系，每列用 COMMENT 注释说明它来源于哪个文件的哪个字段",
+]
+prompt_claude = """项目的数据模型散在好几种格式里，帮我写一份统一的 SQL DDL 数据字典放到 docs/data_dictionary.sql"""
+followups_claude = [
+  "先规范化 TaskConfig、PipelineState 三级嵌套、Criterion 和 BatchConfig 为至少 5 张关系表，CREATE TABLE 包含完整列类型、NOT NULL 约束、主键和外键，submissions 表要覆盖 SUBMISSION_FIELDNAMES 的所有字段",
+  "添加三个视图：passrate_comparison 对比两模型 passrate 和差值，threshold_violations 根据 check_passrate_thresholds 四条规则做筛选，stage_progress 按 done/failed/pending 分组统计各阶段进度",
+  "在文件顶部用 SQL 注释画一个 ASCII ER 图展示表间关联，每列加 COMMENT 注释标注对应的源文件和原始字段名",
+]
+
+[[task]]
+id = "CT-0051"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\dataforge-core"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "data_engineering"
+language = "sql"
+task_title = "修复 export 和 stats 模块中 passrate 为零时统计聚合与阈值判断的边界条件错误"
+task_description = """ctpipe 在处理 passrate 边界值时存在多处不一致的 bug：(1) export.py 第 127-129 行 _build_threshold_check 中，当 qwen_passrate 或 claude_passrate 为 0.0（合法的极低分）而非 None 时，has_qwen/has_claude 被错误地设为 False（因为 `0.0 > 0` 为 False），导致本应触发的阈值告警被静默跳过；(2) stats.py 第 96 行 _collect_passrate_stats 中同样使用 `value > 0` 过滤，导致 passrate 恰好为 0.0 的任务被排除出统计，min/mean/count 计算不准确；(3) finalize.py 第 157-158 行使用 `bool(row.get('qwen_passrate'))` 判断是否有 passrate 数据，但当 passrate 字符串为 '0.0000' 时 bool 为 True，与 export.py 和 stats.py 的数值判断逻辑不一致。请修复这三处 bug，确保 passrate=0.0 被视为合法数据参与阈值检查和统计聚合。同时在 docs/analysis/passrate_zero_edge_cases.sql 中编写 SQL 测试查询，用 INSERT + SELECT 验证修复后 passrate=0 的行为正确性（包括阈值判断、聚合统计、NULL vs 0 的区分）。"""
+acceptance_criteria = [
+  "export.py 的 _build_threshold_check 中 has_qwen/has_claude 改为基于 is not None 判断而非 > 0，使 passrate=0.0 被视为有效数据",
+  "stats.py 的 _collect_passrate_stats 中过滤条件从 value > 0 改为 isinstance(value, (int, float)) and value is not None（或等价逻辑），passrate=0.0 的任务参与统计",
+  "stats.py 的 _collect_passrate_diff 中同步修复过滤条件，确保配对差值计算包含 passrate=0.0 的任务",
+  "finalize.py 中 has_qwen/has_claude 的判断逻辑与修复后的 export.py 保持一致",
+  "docs/analysis/passrate_zero_edge_cases.sql 文件存在，包含创建测试表、INSERT 测试数据（含 passrate=0.0、passrate=NULL、passrate=0.5 等边界值）和 SELECT 验证查询",
+  "SQL 测试查询验证：passrate=0.0 时 threshold_violations 视图正确返回告警行，聚合统计的 COUNT 包含该行，MIN 值为 0.0",
+  "现有测试 pytest tests/test_export.py 通过，且新增至少 2 个测试用例覆盖 passrate=0.0 的场景",
+]
+prompt_qwen = """项目里 passrate 为 0.0 的任务在 export 和 stats 模块里被当成没有数据跳过了，阈值告警和统计聚合都不对，帮我修一下"""
+followups_qwen = [
+  "export.py 的 _build_threshold_check 和 stats.py 的 _collect_passrate_stats、_collect_passrate_diff、_collect_per_task 里都用了 value > 0 来判断是否有数据，passrate=0.0 就被漏了，改成基于 is not None 判断",
+  "finalize.py 里 has_qwen/has_claude 用的是 bool(row.get(...))，跟 export.py 改完之后的逻辑不一致，也同步改一下，要能正确区分空字符串（无数据）和 '0.0000'（合法零分）",
+  "在 docs/analysis/passrate_zero_edge_cases.sql 写 SQL 测试查询，建一个临时表插入 passrate=0.0、NULL、0.5 等边界数据，然后用 SELECT 验证阈值判断、聚合统计、NULL vs 0 的区分都正确",
+  "给 test_export.py 加至少两个测试用例覆盖 passrate=0.0 的场景，比如验证 _build_threshold_check 在 passrate=0.0 时 passed 仍为 True，以及 summary 的 count 和 min 包含 0.0 的任务",
+]
+prompt_claude = """export 和 stats 模块里 passrate=0.0 的边界判断有 bug，0.0 被错误地当成无数据排除掉了，帮修下"""
+followups_claude = [
+  "export.py 的 _build_threshold_check 里 has_qwen/has_claude 用了 > 0 判断，stats.py 的 _collect_passrate_stats、_collect_passrate_diff 和 _collect_per_task 也有同样问题，全部改成用 is not None 来判断有没有数据",
+  "finalize.py 的 has_qwen/has_claude 是用 bool(row.get(...)) 判断的，和修完的 export.py 不一致，同步修改一下，确保空字符串算无数据、'0.0000' 算有效数据",
+  "在 docs/analysis/passrate_zero_edge_cases.sql 里写 SQL 验证查询，CREATE TABLE 插入 passrate=0.0、NULL、正常值的测试行，用 SELECT 验证聚合统计的 COUNT 包含 0.0、MIN 为 0.0、NULL 被正确排除",
+  "在 test_export.py 里新增至少两个测试，验证 passrate=0.0 时 threshold_check 正常工作、summary 的 per_model_passrate 统计包含 passrate=0.0 的任务",
+]
+
+[[task]]
+id = "CT-0052"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\dataforge-core"
+clone_method = "git"
+task_type = "feature"
+domain = "data_engineering"
+language = "sql"
+task_title = "新增 SQLite 持久化模块支持跨批次 pipeline 数据归档与 SQL 查询分析"
+task_description = """当前 ctpipe 的数据存储分散在 JSON（pipeline_state）、CSV（submission）和 TOML（scores）文件中，无法进行跨批次聚合分析（如「过去 5 个批次中哪些 task_type 的 qwen passrate 最低」或「哪些项目被重复使用」）。请新建 ctpipe/db.py 模块，实现以下功能：(1) 定义 SQLite 数据库 schema（CREATE TABLE），包含 batches、tasks、pipeline_stages、scoring_criteria、submissions 五张表，schema 设计需参考 config.py 的 TaskConfig/BatchConfig 字段、state.py 的状态结构和 toml_utils.py 的 Criterion 结构；(2) 实现 archive_batch(config: BatchConfig) 函数，将当前批次的完整数据（从 pipeline_state.json + submission.csv + score TOML 文件）写入 SQLite 数据库（默认路径 ctpipe_archive.db），使用 INSERT OR REPLACE 确保幂等性；(3) 实现 query(db_path, sql, params) 函数，支持任意 SQL 查询并返回结构化结果；(4) 在 cli.py 中注册 `db archive` 和 `db query` 两个子命令；(5) 在 db.py 中内置 5 个常用查询模板作为 BUILTIN_QUERIES 字典（如 cross_batch_passrate、task_type_distribution、project_reuse、threshold_failure_rate、scoring_dimension_frequency）。"""
+acceptance_criteria = [
+  "ctpipe/db.py 文件存在，包含 init_db、archive_batch、query 三个公开函数",
+  "init_db 创建的 schema 包含 batches、tasks、pipeline_stages、scoring_criteria、submissions 五张表，表间有正确的外键关系",
+  "tasks 表包含 task_id、batch_date、task_type、domain、language、task_title 等列，与 TaskConfig 字段对应",
+  "scoring_criteria 表包含 task_id、batch_date、model、name、score、weight、points、rationale 等列，与 Criterion 结构对应",
+  "archive_batch 函数能正确读取 pipeline_state.json、submission.csv 和 scores/目录下的 TOML 文件，写入 SQLite 数据库",
+  "archive_batch 使用 INSERT OR REPLACE 实现幂等性，重复执行不产生重复数据",
+  "cli.py 中注册了 db 子命令组，支持 `python -m ctpipe db archive` 和 `python -m ctpipe db query --sql 'SELECT ...'` 两个操作",
+  "BUILTIN_QUERIES 包含至少 5 个预定义 SQL 查询，每个查询使用 JOIN 或子查询实现跨表分析",
+  "新增 tests/test_db.py 包含至少 3 个测试用例，覆盖 schema 创建、数据归档和查询功能",
+]
+prompt_qwen = """帮我给 ctpipe 新建一个 db.py 模块，用 SQLite 做跨批次的 pipeline 数据归档和 SQL 查询分析"""
+followups_qwen = [
+  "先设计 schema，五张表 batches/tasks/pipeline_stages/scoring_criteria/submissions，字段参考 config.py 的 TaskConfig 和 toml_utils.py 的 Criterion，表间加外键",
+  "实现 archive_batch 函数，从 delivery 目录下的 pipeline_state.json、submission.csv 和 scores 目录的 TOML 文件归档到 SQLite，用 INSERT OR REPLACE 保证幂等",
+  "cli.py 里注册 db 子命令组，支持 db archive 和 db query --sql 两个操作，db.py 里再内置 5 个跨表查询模板比如跨批次 passrate、task_type 分布这些",
+  "写 test_db.py，覆盖 schema 创建、数据归档幂等性、查询功能至少三个测试用例",
+]
+prompt_claude = """ctpipe 数据分散在 JSON、CSV、TOML 里没法做跨批次分析，帮我加个 SQLite 持久化模块支持归档和查询"""
+followups_claude = [
+  "init_db 先建五张表：batches、tasks、pipeline_stages、scoring_criteria、submissions，列对应 config.py 的 TaskConfig 和 toml_utils.py 的 Criterion 字段，加上外键关系",
+  "写 archive_batch 函数，读取 delivery 目录下的 pipeline_state.json、submission.csv、scores/ 下的 TOML 写进 SQLite，重复执行不能产生重复数据",
+  "在 cli.py 加 db 子命令组支持 db archive 和 db query --sql，然后在 db.py 内置 5 个常用 SQL 查询模板做跨表分析",
+  "加 test_db.py 单元测试，建表、归档幂等性、SQL 查询至少各写一个用例",
+]
+
+[[task]]
+id = "CT-0053"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\airflow-tutorial"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "data_engineering"
+language = "sql"
+task_title = "修复 mysql_to_gcs DAG 中 SQL 查询的时区转换错误与 NULL 值丢失问题"
+task_description = """当前 dags/mysql_to_gcs.py 中的 SQL 抽取查询存在两个已知数据质量问题：(1) 时间戳字段从 MySQL 导出时未进行时区转换（MySQL 使用服务器本地时区，BigQuery 期望 UTC），导致 rental.return_date、payment.payment_date 等字段在 BigQuery 中时间偏移；(2) 包含 NULL 值的可选字段（如 customer.email、address.address2）在 JSON 序列化为 GCS 文件时被静默丢弃而非保留为 null，导致 BigQuery 加载后数据行数正确但字段值缺失。需要修改相关 SQL 查询添加 CONVERT_TZ() 处理，并修复 NULL 值的序列化逻辑，同时更新 meta/sakila-database.sql 中的相关注释说明时区要求。"""
+acceptance_criteria = [
+  "dags/mysql_to_gcs.py 中所有 DATETIME/TIMESTAMP 类型字段的抽取 SQL 使用 CONVERT_TZ() 或等效方法将时间转换为 UTC",
+  "NULL 值字段在导出过程中被正确保留（序列化为 JSON null 而非省略键），修复后的逻辑对所有可选字段生效",
+  "meta/sakila-database.sql 中对受影响的时间字段添加注释，说明时区存储约定（UTC）",
+  "修复不改变现有 DAG 的任务依赖关系和调度频率配置",
+]
+prompt_qwen = """dags/mysql_to_gcs.py 里数据导出有两个 bug，时间戳字段没做时区转换导致写入 BigQuery 时间偏移，NULL 值字段导出 JSON 时被丢掉了，帮我修一下"""
+followups_qwen = [
+  "所有 DATETIME 和 TIMESTAMP 类型的字段在抽取 SQL 里加上 CONVERT_TZ 转成 UTC，rental.return_date、payment.payment_date 这些都要处理",
+  "再修 NULL 值的序列化逻辑，导出 JSON 时 null 字段要保留 key 输出为 null 而不是省略，customer.email、address.address2 这类可选字段都要覆盖到",
+  "meta/sakila-database.sql 里受影响的时间字段加上注释说明时区存储约定是 UTC，另外确保修复不改变 DAG 的任务依赖关系和调度频率",
+]
+prompt_claude = """mysql_to_gcs DAG 抽数据有问题，时间字段没转成 UTC 导致 BigQuery 里时间不对，可选字段为 NULL 时导出 JSON 直接把 key 省掉了，帮修一下"""
+followups_claude = [
+  "把抽取 SQL 里所有时间类型字段都用 CONVERT_TZ 或等效方式转成 UTC，像 rental.return_date、payment.payment_date 这些都不能漏",
+  "修一下 NULL 值的处理，JSON 序列化时 null 字段不能把 key 丢掉要输出为 null，对 customer.email、address.address2 这类可选字段都生效",
+  "在 meta/sakila-database.sql 给相关时间字段补上注释说明用 UTC 存储，同时保证 DAG 的依赖关系和调度配置不受影响",
+]
+
+[[task]]
+id = "CT-0054"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\dataforge-core"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "data_engineering"
+language = "sql"
+task_title = "用 SQL CTE 和窗口函数解释 passrate 计算与跨模型统计聚合的数据流转逻辑"
+task_description = """ctpipe 的核心数据分析逻辑分散在多个 Python 模块中：toml_utils.py 的 calc_passrate 实现加权评分计算、config.py 的 check_passrate_thresholds 实现四条阈值规则、stats.py 的 _collect_passrate_stats 和 _collect_passrate_diff 实现跨模型统计聚合、export.py 的 _build_summary 实现批次级汇总。请深入阅读上述文件，撰写一份中文技术解释文档 docs/analysis/passrate_sql_explanation.md，完成以下内容：(1) 逐步解释 calc_passrate 的加权公式如何从 [[criterion]] 数组中聚合出单个 passrate 值，并用等价的 SQL 聚合查询（带 CTE）表达；(2) 解释 check_passrate_thresholds 的四条规则（qwen<0.7、claude>0.7、claude>qwen、relative_gain>25%）及其短路逻辑，用 SQL CASE WHEN 表达每条规则的判断；(3) 解释 _collect_passrate_diff 中 claude-qwen 差值的配对统计（mean/median/std/positive/negative），用 SQL 窗口函数 + CTE 实现等价查询；(4) 解释 _build_summary 的聚合逻辑（min/max/mean/count per model + threshold_passed 计数），并说明为什么 export.py 和 stats.py 的 passrate 数据来源不同（一个从 score 文件实时读取，一个从 finalize state 缓存读取）。每个解释必须包含可运行的 SQL 代码块。"""
+acceptance_criteria = [
+  "文档输出到 docs/analysis/passrate_sql_explanation.md，使用中文撰写",
+  "calc_passrate 的 SQL 等价查询使用 SUM(score * weight) / SUM(points * weight) 并通过 CTE 从 criterion 表聚合，与 toml_utils.py 第 97-102 行逻辑完全一致",
+  "check_passrate_thresholds 的 SQL 实现包含 4 个独立的 CASE WHEN 条件，覆盖 qwen_pr >= 0.7、claude_pr <= 0.7、claude_pr <= qwen_pr、relative_gain <= 0.25 四个判断分支",
+  "特别解释了 qwen_pr 为 0 时 relative_gain 的 fallback 逻辑（config.py 第 373-387 行的 else 分支），并在 SQL 中用 NULLIF 或 CASE 处理除零",
+  "_collect_passrate_diff 的 SQL 等价查询使用窗口函数或子查询计算配对差值的 AVG、PERCENTILE_CONT(0.5)（或等价中位数实现）和标准差",
+  "明确指出 export.py 从 score TOML 文件实时计算 passrate 而 stats.py 从 finalize state 的缓存值读取的差异，并解释这可能导致的数据不一致场景",
+]
+prompt_qwen = """帮我写一份中文技术文档 docs/analysis/passrate_sql_explanation.md，用等价的 SQL 查询解释 ctpipe 中 passrate 从评分计算到跨模型统计聚合的完整数据流转逻辑"""
+followups_qwen = [
+  "先从 toml_utils.py 的 calc_passrate 开始，对照源码把加权评分公式用带 CTE 的 SQL 聚合查询写出来，要跟实际代码逻辑完全一致",
+  "再解释 config.py check_passrate_thresholds 的四条阈值规则，用 SQL CASE WHEN 表达每个判断分支，特别注意 qwen 为 0 时 relative_gain 的除零 fallback 处理",
+  "接着用 SQL 窗口函数实现 stats.py _collect_passrate_diff 的配对差值统计，需要算出均值、中位数、标准差以及 positive/negative 计数",
+  "最后补充 export.py _build_summary 的聚合逻辑，对比它和 stats.py 在 passrate 数据来源上的差异，分析什么场景下两者会产生不一致",
+]
+prompt_claude = """写个中文技术解释文档 docs/analysis/passrate_sql_explanation.md，把 ctpipe 里 passrate 计算、阈值校验、跨模型统计聚合这套逻辑用等价 SQL 表达出来"""
+followups_claude = [
+  "先把 toml_utils.py calc_passrate 的加权公式用 SQL CTE 聚合查询写出来，确保跟源码的计算逻辑完全对应",
+  "然后用 SQL CASE WHEN 写出 config.py check_passrate_thresholds 的四个判断条件，重点处理 qwen=0 时 relative_gain 除零的 fallback 逻辑",
+  "用 SQL 窗口函数或子查询把 stats.py _collect_passrate_diff 的等价查询实现出来，要包含 mean、median、标准差和正负计数",
+  "最后解释 export.py _build_summary 的聚合方式，说清楚它从 score 文件实时计算 vs stats.py 从 finalize state 缓存读取的区别，以及可能的数据不一致场景",
+]
+
+[[task]]
+id = "CT-0055"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\aaocp"
+clone_method = "git"
+task_type = "code-explanation"
+domain = "data_engineering"
+language = "sql"
+task_title = "解释各区域Top3热门商品分析模块中多层临时表与窗口函数的SQL执行流程"
+task_description = """在 `top3product_by_area` 模块的 `Top3ByArea.scala` 中，系统通过四步链式SparkSQL临时表查询实现了各区域Top3热门商品的分析：
+1. `tmp_click_product_basic`：将用户点击行为RDD与城市信息RDD JOIN后注册为基础临时表；
+2. `tmp_area_product_click_count`：使用自定义UDAF `GroupConcatDistinctUDAF` 和UDF `concat_long_string` 对区域+商品进行GROUP BY聚合；
+3. `tmp_area_fullprod_click_count`：与Hive中的 `product_info` 表JOIN，通过UDF `get_json_object` 解析 `extend_info` JSON字段获取商品状态；
+4. 最终查询：使用 `ROW_NUMBER() OVER (PARTITION BY area ORDER BY click_count DESC)` 窗口函数取各区域前3。
+
+请结合 `Top3ByArea.scala`、`GroupConcatDistinctUDAF.scala`、`DataModel.scala`（commons模块）以及 `ad.sql` 中的表结构，完整解释以下内容：
+- 四层临时表之间的数据流转关系和每一层SQL的作用
+- UDAF `GroupConcatDistinctUDAF` 的 `update` 和 `merge` 方法如何实现城市信息的去重拼接
+- `CASE WHEN` 区域等级划分和 `ROW_NUMBER()` 窗口函数的配合使用方式
+- 为什么使用 `leftOuterJoin` 而非 `join` 来关联城市信息RDD"""
+acceptance_criteria = [
+  "清晰解释了从 tmp_click_product_basic → tmp_area_product_click_count → tmp_area_fullprod_click_count → 最终Top3查询 的四层数据流转关系",
+  "正确说明了 GroupConcatDistinctUDAF 中 inputSchema/bufferSchema/update/merge/evaluate 各方法的作用及去重拼接机制",
+  "解释了 ROW_NUMBER() OVER(PARTITION BY area ORDER BY click_count DESC) 窗口函数如何实现分区内排序并取Top3",
+  "解释了 CASE WHEN 将地理区域映射为A/B/C/D等级的业务含义",
+  "说明了 concat_long_string UDF 和 get_json_object UDF 各自的用途与调用时机",
+]
+prompt_qwen = """帮我解释一下 Top3ByArea 模块里四层临时表和窗口函数的 SQL 执行流程"""
+followups_qwen = [
+  "重点说说 GroupConcatDistinctUDAF 里 update 和 merge 是怎么做城市信息去重拼接的，inputSchema、bufferSchema、evaluate 这些也一起讲清楚",
+  "ROW_NUMBER() 窗口函数取 Top3 和 CASE WHEN 区域等级划分是怎么配合使用的",
+  "关联城市信息那里为什么用 leftOuterJoin 而不是 join？还有 concat_long_string 和 get_json_object 这两个 UDF 分别在哪一步调用、做什么用的",
+  "把从 tmp_click_product_basic 到最终 Top3 查询的四层数据流转关系完整梳理一遍，每层输入输出讲清楚",
+]
+prompt_claude = """Top3ByArea 这个模块的多层 SparkSQL 临时表链式查询逻辑帮我梳理一下"""
+followups_claude = [
+  "GroupConcatDistinctUDAF 的 update、merge、evaluate 这几个方法详细讲一下，去重拼接城市信息的机制是什么，inputSchema 和 bufferSchema 怎么定义的",
+  "CASE WHEN 把地理区域映射成 A/B/C/D 等级和 ROW_NUMBER() OVER 取各区域前三是怎么配合的",
+  "城市信息 RDD 关联为什么选 leftOuterJoin 而不是 join？另外 concat_long_string 和 get_json_object 两个 UDF 各自在哪一层临时表中使用、作用是什么",
+  "最后帮我把四层临时表 tmp_click_product_basic → tmp_area_product_click_count → tmp_area_fullprod_click_count → 最终查询的完整数据流转关系理一遍，每层的输入输出说明白",
+]
+
+[[task]]
+id = "CT-0056"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\aaocp"
+clone_method = "git"
+task_type = "bug-fix"
+domain = "data_engineering"
+language = "sql"
+task_title = "修复 GroupConcatDistinctUDAF 的 update 方法中 buffer 值被旧值覆盖的缺陷"
+task_description = """在 `top3product_by_area/src/main/scala/GroupConcatDistinctUDAF.scala` 的 `update` 方法中存在一个逻辑缺陷，导致聚合多个城市信息时只能保留第一个城市。
+
+当前代码逻辑（第36-44行）：
+```scala
+var bufferCityInfo = buffer(0).toString
+var inputStr = input.getString(0)
+if (!bufferCityInfo.contains(inputStr)) {
+  if ("".equals(bufferCityInfo)) bufferCityInfo = inputStr
+  else buffer(0) += ("," + inputStr)
+  buffer.update(0, bufferCityInfo)
+}
+```
+
+当 buffer 已有值（如 `"0:北京"`）且 input 为新值（如 `"1:上海"`）时：
+1. `else` 分支执行 `buffer(0) += ("," + inputStr)`，buffer(0) 变为 `"0:北京,1:上海"`
+2. 紧接着 `buffer.update(0, bufferCityInfo)` 将 buffer(0) 覆盖回局部变量的旧值 `"0:北京"`
+
+这意味着除第一个城市外的所有后续城市信息都会丢失，导致 `tmp_area_product_click_count` 表中的 `city_infos` 列始终只包含单个城市。
+
+请修复此缺陷，同时检查 `merge` 方法中是否存在类似的 buffer 操作问题，确保跨分区合并时城市信息也能正确去重拼接。修复后需验证对 `Top3ByArea.scala` 中 `generateTempAreaPrdocutClickCountTable` 方法的 SQL 查询结果无副作用。"""
+acceptance_criteria = [
+  "update 方法修复后，当 buffer 非空且 input 为新值时，buffer(0) 正确追加新的城市信息而不被旧值覆盖",
+  "buffer 为空时（首次输入），行为保持不变，能正确初始化首个城市信息",
+  "contains 去重逻辑仍然生效，重复城市信息不会被二次添加",
+  "merge 方法经检查后，跨分区合并的去重拼接逻辑正确无误或同步修复",
+  "修复不改变 UDAF 的 inputSchema、bufferSchema、dataType 等接口定义",
+]
+prompt_qwen = """GroupConcatDistinctUDAF 的 update 方法有个 buffer 被旧值覆盖的 bug，聚合城市信息时只能保留第一个，帮我修一下"""
+followups_qwen = [
+  "merge 方法里也有类似的 buffer 操作，帮我检查一下跨分区合并时去重拼接的逻辑有没有同样的问题，有的话一起修了",
+  "确认一下修完之后 buffer 为空时首次输入、以及 contains 去重这些边界情况都还是正常的，别改出新问题",
+  "看下这个修复对 Top3ByArea.scala 里 generateTempAreaPrdocutClickCountTable 方法的 SQL 查询有没有副作用，UDAF 的 inputSchema、bufferSchema、dataType 这些接口定义不要动",
+]
+prompt_claude = """帮我修下 GroupConcatDistinctUDAF 里 update 方法的 bug，多个城市聚合的时候只留下了第一个城市信息，后面追加的都被覆盖了"""
+followups_claude = [
+  "帮我顺便看看 merge 方法里有没有类似的 buffer 覆盖问题，跨分区合并的时候城市去重拼接逻辑也要确保正确",
+  "检查一下边界情况：buffer 为空时的首次写入、重复城市的 contains 去重，确保修复没有引入新的问题",
+  "确认修复不会影响 Top3ByArea.scala 中 generateTempAreaPrdocutClickCountTable 的 SQL 查询结果，UDAF 的接口定义（inputSchema、bufferSchema、dataType）保持不变",
+]
+
+[[task]]
+id = "CT-0057"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\aaocp"
+clone_method = "git"
+task_type = "enhancement"
+domain = "data_engineering"
+language = "sql"
+task_title = "将广告模块DAO层的先查后更新SQL模式优化为INSERT ON DUPLICATE KEY UPDATE"
+task_description = """在 `advertising/src/main/scala/JdbcHelper.scala` 中，`AdStatDAO.updateBatch`、`AdUserClickCountDAO.updateBatch` 和 `AdClickTrendDAO.updateBatch` 三个方法均采用了相同的低效模式：先用SELECT查询记录是否存在，然后分别执行INSERT或UPDATE。这种方式在高并发实时流处理场景下存在以下问题：
+
+1. **性能问题**：每条记录需要一次SELECT + 一次INSERT/UPDATE，即2次数据库交互，在Spark Streaming每5秒一个batch的场景下开销巨大。
+2. **并发安全问题**：SELECT和INSERT/UPDATE之间没有事务保护，可能出现两个分区同时判断记录不存在然后同时INSERT导致重复数据。
+3. **代码重复**：三个DAO的updateBatch方法逻辑几乎完全相同，违反DRY原则。
+
+请进行以下优化：
+
+1. **为 `ad_user_click_count`、`ad_stat`、`ad_click_trend` 三张表添加合适的唯一索引或联合主键**（修改 `advertising/src/main/resources/ad.sql`），使 MySQL 能使用 `INSERT ... ON DUPLICATE KEY UPDATE` 语法。
+
+2. **将三个DAO的updateBatch方法重构为单条 `INSERT ... ON DUPLICATE KEY UPDATE` SQL**：
+   - `ad_user_click_count`：clickCount字段应执行累加（`clickCount = clickCount + VALUES(clickCount)`）
+   - `ad_stat`：clickCount字段应执行覆盖（`clickCount = VALUES(clickCount)`）
+   - `ad_click_trend`：clickCount字段应执行覆盖
+
+3. **可选**：抽取通用的 `upsertBatch` 方法到 `JdbcHelper` 中减少重复代码。"""
+acceptance_criteria = [
+  "ad.sql 中为 ad_user_click_count 添加了 (date, userid, adid) 联合唯一键，为 ad_stat 添加了 (date, province, city, adid) 联合唯一键，为 ad_click_trend 添加了 (date, hour, minute, adid) 联合唯一键",
+  "AdUserClickCountDAO.updateBatch 重构为单条 INSERT ... ON DUPLICATE KEY UPDATE 语句，clickCount 使用累加语义",
+  "AdStatDAO.updateBatch 和 AdClickTrendDAO.updateBatch 重构为单条 INSERT ... ON DUPLICATE KEY UPDATE 语句，clickCount 使用覆盖语义",
+  "重构后每条记录仅需一次数据库交互，消除了 SELECT 查询步骤",
+  "AdBlacklistDAO 中已有的 INSERT IGNORE 语法保持不变",
+  "AdverStat.scala 中的调用代码无需修改即可正常工作",
+]
+prompt_qwen = """advertising 模块里三个 DAO 的 updateBatch 都是先 SELECT 再分别 INSERT/UPDATE，帮我改成 INSERT ON DUPLICATE KEY UPDATE 的方式"""
+followups_qwen = [
+  "先改 ad.sql 的建表语句，给 ad_user_click_count 加 (date, userid, adid) 联合唯一键，ad_stat 加 (date, province, city, adid) 联合唯一键，ad_click_trend 加 (date, hour, minute, adid) 联合唯一键",
+  "现在重构三个 updateBatch 方法，都改成单条 INSERT ... ON DUPLICATE KEY UPDATE。注意 AdUserClickCountDAO 的 clickCount 要累加，AdStatDAO 和 AdClickTrendDAO 的 clickCount 是覆盖",
+  "三个 DAO 的 upsert 逻辑基本一样，把重复部分抽成 JdbcHelper 里的通用方法，同时确保 AdBlacklistDAO 的 INSERT IGNORE 保持原样不动",
+  "检查一下 AdverStat.scala 里的调用代码，确认重构后接口兼容、不需要改调用方",
+]
+prompt_claude = """帮我优化广告模块 JdbcHelper.scala 里 AdStatDAO、AdUserClickCountDAO、AdClickTrendDAO 三个 updateBatch 方法，把先查后更新改成 upsert"""
+followups_claude = [
+  "先把 ad.sql 里三张表的建表语句加上联合唯一键：ad_user_click_count 用 (date, userid, adid)，ad_stat 用 (date, province, city, adid)，ad_click_trend 用 (date, hour, minute, adid)",
+  "然后把三个 updateBatch 改成 INSERT ... ON DUPLICATE KEY UPDATE，AdUserClickCountDAO 的 clickCount 用累加语义 clickCount=clickCount+VALUES(clickCount)，另外两个用覆盖语义",
+  "三个 DAO 的 updateBatch 逻辑高度重复，提取一个通用的 upsertBatch 工具方法到 JdbcHelper 里，AdBlacklistDAO 的 INSERT IGNORE 不要动",
+  "确认下 AdverStat.scala 里所有调用 updateBatch 的地方不需要改动就能正常工作",
+]
+
+[[task]]
+id = "CT-0058"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\aaocp"
+clone_method = "git"
+task_type = "testing-quality"
+domain = "data_engineering"
+language = "sql"
+task_title = "为各模块Spark SQL查询和MySQL写入逻辑编写数据正确性验证测试"
+task_description = """当前项目的 session、page、advertising、top3product_by_area 四个模块均包含关键的SQL查询和数据写入逻辑，但完全没有单元测试覆盖。请使用Spark本地模式（local[*]）和内嵌数据源编写测试，验证以下核心SQL逻辑的正确性：
+
+**测试1：SessionStat中的Hive SQL日期过滤**
+- 构造包含多个日期的 `UserVisitAction` 测试数据，注册为临时表
+- 验证 `select * from user_visit_action where date >= '起始' and date <= '结束'` 只返回范围内数据
+- 验证 SQL 拼接中日期参数包含特殊字符时不会导致语法错误
+
+**测试2：Top3ByArea中的窗口函数取TopN**
+- 构造包含多个area和product的点击数据，注册为 `tmp_area_fullprod_click_count` 临时表
+- 执行 `ROW_NUMBER() OVER (PARTITION BY area ORDER BY click_count DESC)` 查询
+- 验证每个area恰好返回不超过3条记录，且按click_count降序排列
+
+**测试3：PageOneStepConvertRate中的转化率计算**
+- 构造已知的 `pageSplitPvMap` 和 `startPagePv`
+- 调用 `computePageSplitConvertRate` 方法
+- 验证返回的转化率值与手工计算结果一致（考虑浮点数精度）
+
+**测试4：AdProvinceTop3DAO的批量删除重插逻辑**
+- 使用H2内存数据库模拟MySQL
+- 验证 `updateBatch` 先按(date, province)删除旧数据再插入新数据的逻辑正确性
+- 验证去重逻辑（相同date_province组合只删除一次）
+
+**测试5：GroupConcatDistinctUDAF的去重聚合**
+- 直接实例化UDAF，模拟多次 `update` 和 `merge` 调用
+- 验证重复输入被正确去重，不同输入被逗号拼接"""
+acceptance_criteria = [
+  "测试1验证了Spark SQL日期范围过滤的正确性，包含边界日期的包含/排除行为",
+  "测试2验证了ROW_NUMBER窗口函数在多个area分区上正确取Top3，包括click_count相同时的处理",
+  "测试3验证了 computePageSplitConvertRate 方法对已知输入返回正确的逐级转化率，浮点精度误差在0.01以内",
+  "测试4使用内存数据库验证了批量先删后插的幂等性：连续两次调用updateBatch不会产生重复数据",
+  "测试5通过单元测试验证了GroupConcatDistinctUDAF的initialize/update/merge/evaluate全流程，特别是重复输入的去重行为",
+  "所有测试使用 SparkSession.builder().master(\"local[*]\") 本地模式运行，不依赖外部Hive或MySQL服务",
+]
+prompt_qwen = """这个电商数据分析项目的几个核心模块的SQL查询和数据处理逻辑完全没有测试覆盖，帮我加上单元测试"""
+followups_qwen = [
+  "先写Spark SQL相关的测试，用local模式构造UserVisitAction测试数据，测session模块的日期范围过滤和top3product_by_area模块ROW_NUMBER取每个area的Top3",
+  "再测一下computePageSplitConvertRate的转化率计算和GroupConcatDistinctUDAF的update/merge去重拼接",
+  "用H2内存数据库测AdProvinceTop3DAO.updateBatch的先删后插逻辑，连续调两次不能有重复数据",
+  "补充边界case：边界日期的包含行为、click_count相同时的排序处理、转化率浮点精度控制在0.01以内",
+]
+prompt_claude = """帮这个项目的核心模块写数据正确性验证测试，SQL查询和数据写入逻辑都没有测试"""
+followups_claude = [
+  "用local模式造测试数据，验证session模块SQL日期过滤只返回范围内数据，以及top3product_by_area的ROW_NUMBER窗口函数按area分区取前3",
+  "加computePageSplitConvertRate的逐级转化率计算测试，还有GroupConcatDistinctUDAF完整生命周期的去重测试",
+  "内存数据库模拟MySQL，测AdProvinceTop3DAO.updateBatch按date_province去重后先删后插的幂等性",
+  "加上边界情况：日期恰好在边界上的包含/排除、相同click_count下的排序稳定性、浮点精度误差不超过0.01",
+]
+
+[[task]]
+id = "CT-0059"
+project_path = "D:\\\\A3Code\\\\runs\\\\_projects\\\\aaocp"
+clone_method = "git"
+task_type = "feature"
+domain = "data_engineering"
+language = "sql"
+task_title = "为会话分析模块新增基于SQL的用户次日留存率计算功能"
+task_description = """当前 `session` 模块（`SessionStat.scala`）已实现了会话时长/步长统计、随机抽样、Top10品类和Top10活跃Session四个子需求，但缺少用户留存率分析能力。
+
+请在 `session` 模块中新增第五个子需求：**基于Hive SQL的用户次日留存率计算**，具体要求：
+
+1. **新建MySQL结果表**：在 `aaocp_commons/src/main/resources/commerce[data].sql` 中添加 `user_retention_rate` 表的DDL，包含字段：`taskid VARCHAR(255)`、`date VARCHAR(30)`（基准日期）、`new_user_count INT`（当日新用户数）、`retained_user_count INT`（次日留存用户数）、`retention_rate DOUBLE`（留存率）。
+
+2. **实现留存率SQL逻辑**：通过Spark SQL对 `user_visit_action` 表编写查询，找出每天首次出现的用户（新用户），然后检查这些用户在次日是否仍有访问行为，计算 `retained_user_count / new_user_count` 作为次日留存率。
+
+3. **新增case class和写入逻辑**：在 `session/src/main/scala/DataModel.scala` 中添加 `UserRetentionRate` case class，在 `SessionStat.scala` 中新增 `calculateUserRetentionRate` 方法，将结果通过JDBC写入MySQL。
+
+4. **在 `main` 方法中集成调用**，放在子需求四之后。"""
+acceptance_criteria = [
+  "commerce[data].sql 中新增了 user_retention_rate 表的完整DDL（含DROP IF EXISTS）",
+  "留存率SQL正确实现：先通过子查询找出每个用户在 user_visit_action 中的最早日期（首次访问日），再与次日数据LEFT JOIN计算留存",
+  "DataModel.scala 中新增了 UserRetentionRate(taskid, date, new_user_count, retained_user_count, retention_rate) case class",
+  "SessionStat.scala 中新增 calculateUserRetentionRate 方法，使用 SparkSession.sql 执行留存率查询并通过JDBC写入MySQL",
+  "main 方法中在子需求四（getTop10Session）之后正确调用了 calculateUserRetentionRate",
+  "SQL查询中使用参数化的startDate和endDate进行日期过滤，与现有的日期过滤逻辑保持一致",
+]
+prompt_qwen = """帮我给 session 模块加一个用户次日留存率的计算功能"""
+followups_qwen = [
+  "先在 commerce[data].sql 里加上 user_retention_rate 表的建表DDL，包含 taskid、date、new_user_count、retained_user_count、retention_rate 这些字段，风格跟现有的表保持一致。然后在 session 的 DataModel.scala 里加对应的 case class",
+  "实现留存率的 SQL 查询逻辑：先用子查询从 user_visit_action 找出每个用户最早访问日期作为新用户日，然后 LEFT JOIN 次日的访问数据来判断是否留存，算出 retained_user_count / new_user_count。日期过滤要用 startDate 和 endDate 参数，跟现有逻辑一致",
+  "把计算方法加到 SessionStat.scala 里，用 JDBC 写入 MySQL，参考已有的 getSessionRatio 那套写法。然后在 main 方法的 getTop10Session 调用之后把这个新方法集成进去",
+]
+prompt_claude = """给 session 模块新增一个用户次日留存率的分析功能"""
+followups_claude = [
+  "在 commerce[data].sql 加一个 user_retention_rate 表的 DDL，字段要有 taskid、date、new_user_count、retained_user_count、retention_rate，格式跟已有的建表语句风格统一。同时在 session 的 DataModel.scala 里定义对应的 case class",
+  "写留存率的 SQL 逻辑：用子查询找每个 user_id 在 user_visit_action 中的最早日期（即首次访问日），然后跟次日数据做 LEFT JOIN 计算有多少新用户次日还有访问行为，retention_rate = retained_user_count / new_user_count。startDate 和 endDate 的过滤方式要跟现有的日期过滤保持一致",
+  "在 SessionStat.scala 里新增方法，通过 JDBC 把结果写入 MySQL，写入方式参照现有的比如 getSessionRatio 的模式。最后在 main 里 getTop10Session 后面调用这个新方法",
+]

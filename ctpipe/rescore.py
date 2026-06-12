@@ -22,9 +22,10 @@ from ctpipe.config import (
     build_validated_env,
     check_passrate_thresholds,
     is_valid_criterion_name,
+    model_stem,
     select_delivery_tasks,
 )
-from ctpipe.score import call_scoring_ai, extract_toml_section
+from ctpipe.score import build_context_block, call_scoring_ai, extract_toml_section
 from ctpipe.state import PipelineState
 from ctpipe.toml_utils import Criterion, calc_passrate, has_score_tiers, write_quality_toml, write_rubric_pair
 from ctpipe.trajectory import extract_for_scoring
@@ -59,16 +60,17 @@ def read_task_context(metadata_path: Path) -> dict[str, str]:
     if m:
         ctx["language"] = m.group(1).strip()
 
-    # Initial prompts
+    # Initial prompts – tolerate trailing whitespace after the colon and
+    # a missing trailing newline at end-of-file (old-format edge cases).
     prompts: list[str] = []
-    for block in re.finditer(r"Initial prompt:\s*\n```text\n(.+?)\n```", text, re.DOTALL):
+    for block in re.finditer(r"Initial prompt:\s*\n```text\n(.+?)\n```[^\S\n]*(?:\n|$)", text, re.DOTALL):
         prompts.append(block.group(1).strip())
     if prompts:
         ctx["prompts"] = " | ".join(prompts)
 
     # Follow-up summaries
     followups: list[str] = []
-    for block in re.finditer(r"Follow-up summary:\s*\n```text\n(.+?)\n```", text, re.DOTALL):
+    for block in re.finditer(r"Follow-up summary:\s*\n```text\n(.+?)\n```[^\S\n]*(?:\n|$)", text, re.DOTALL):
         followups.append(block.group(1).strip())
     if followups:
         ctx["followups"] = " | ".join(followups)
@@ -91,6 +93,11 @@ def read_task_context(metadata_path: Path) -> dict[str, str]:
         items = [line.strip().lstrip("- ") for line in m.group(1).strip().splitlines()]
         ctx["acceptance_criteria"] = " | ".join(items)
 
+    # Fallback: use Initial prompt content as task_description when
+    # the structured ## Task Description section is absent.
+    if "task_description" not in ctx and prompts:
+        ctx["task_description"] = prompts[0]
+
     return ctx
 
 
@@ -106,17 +113,81 @@ def build_task_context(task, config) -> dict[str, str]:
             "language": task.language,
             "prompts": task.prompt_qwen,
         }
+
+    # --- 1. Defensive fill: ensure prompts / followups are present --------
+    # When the metadata regex missed the Initial prompt code block entirely
+    # (e.g. a format variant), fall back to the TaskConfig so downstream
+    # fallbacks and the scoring prompt never see empty fields.
+    if not task_ctx.get("prompts"):
+        task_ctx["prompts"] = getattr(task, "prompt_qwen", "")
+    if not task_ctx.get("followups"):
+        followups_list = getattr(task, "followups_qwen", None)
+        if followups_list:
+            task_ctx["followups"] = " | ".join(followups_list)
+
+    # --- 2. Project summary -----------------------------------------------
     if "project_summary" not in task_ctx and task.project_path.is_dir():
         from ctpipe.project_scan import scan_project
         task_ctx["project_summary"] = scan_project(task.project_path)
 
-    # Supplement with structured fields from TaskConfig
+    # Fallback: synthesise a brief context from prompts + followups when
+    # neither the metadata nor scan_project produced a project summary.
+    if not task_ctx.get("project_summary"):
+        parts: list[str] = []
+        if task_ctx.get("prompts"):
+            parts.append(f"任务描述：{task_ctx['prompts']}")
+        if task_ctx.get("followups"):
+            parts.append(f"追问要点：{task_ctx['followups']}")
+        if parts:
+            task_ctx["project_summary"] = "\n".join(parts)
+
+    # --- 3. Structured fields from TaskConfig ------------------------------
     if not task_ctx.get("task_title") and getattr(task, "task_title", ""):
         task_ctx["task_title"] = task.task_title
     if not task_ctx.get("task_description") and getattr(task, "task_description", ""):
         task_ctx["task_description"] = task.task_description
     if not task_ctx.get("acceptance_criteria") and getattr(task, "acceptance_criteria", None):
         task_ctx["acceptance_criteria"] = " | ".join(task.acceptance_criteria)
+
+    # --- 4. Final fallback: Initial prompt → task_description -------------
+    # After all other sources are exhausted, use the (now guaranteed
+    # non-empty) prompts field as the task description so the scoring
+    # prompt always carries task background.
+    if not task_ctx.get("task_description"):
+        task_ctx["task_description"] = task_ctx.get("prompts", "")
+
+    # --- 5. Safety net ----------------------------------------------------
+    # After every fallback chain, fill any remaining critical fields with
+    # default placeholders and warn.  This prevents the scoring prompt from
+    # silently producing an empty 任务背景 block.
+    task_id = getattr(task, "id", "?")
+    _CRITICAL_DEFAULTS = {
+        "project_name": "unknown",
+        "task_type":    "unknown",
+        "domain":       "unknown",
+        "language":     "unknown",
+    }
+    missing_critical: list[str] = []
+    for field, default in _CRITICAL_DEFAULTS.items():
+        if not task_ctx.get(field):
+            task_ctx[field] = default
+            missing_critical.append(field)
+    if missing_critical:
+        print(f"  [{task_id}] WARNING: task context fields missing, "
+              f"filled with defaults: {', '.join(missing_critical)}")
+
+    if not task_ctx.get("task_description"):
+        task_ctx["task_description"] = "（任务描述缺失）"
+        print(f"  [{task_id}] WARNING: task_description is empty after "
+              f"all fallbacks — scoring prompt will use placeholder")
+
+    if not task_ctx.get("prompts"):
+        print(f"  [{task_id}] WARNING: no Initial prompt extracted; "
+              f"dimension customisation may be less specific")
+
+    if not task_ctx.get("project_summary"):
+        print(f"  [{task_id}] WARNING: project_summary is empty; "
+              f"scoring prompt will lack project context")
 
     return task_ctx
 
@@ -180,6 +251,8 @@ def build_dimension_prompt(
 4. 优先选择与核心目标、失败点、验收标准和最终可用性最相关的维度
 5. 与架构边界、安全合规相关的维度设 weight = 2.0，其余设 1.0
 6. 维度 name 必须是定制化的英文 snake_case 标识名（如 `cirq_export_data_flow_comprehension`），体现项目名/技术栈/具体操作，不要使用通用维度名
+7. 每个维度必须保持原子性：一个维度只评一件事，不能同时要求 A 和 B。错误示例："该维度评价模型是否意识到 hooks.js 是 hooks.ts 的编译产物，并在修改源码后同步修改编译产物"——这混合了两个独立能力，必须拆分
+8. 所选维度之间不能有实质性重叠。如果两个维度评价的是同一类能力的不同说法，只保留更精确的一个
 
 ## description 定制规则（极其重要）
 
@@ -189,6 +262,7 @@ def build_dimension_prompt(
 2. **融入项目特征**：把项目名称（{project_name}）、技术栈（{language}）、具体问题（{prompts}）融入到各档位的描述中
 3. 不能是通用模板，必须让人一看就知道这是针对什么项目什么任务的评分标准
 4. 使用中文，写成一行字符串
+5. 每个 description 的各档位定义中，每档只描述一个判断条件。禁止在某一档中用"并且/且/同时"连接多个独立条件
 
 ### 定制化示例
 
@@ -231,6 +305,33 @@ def _fix_toml_description_quotes(text: str) -> str:
     return re.sub(r'description\s*=\s*"(.*)"', _fix_match, text)
 
 
+def _fix_toml_common_errors(text: str) -> str:
+    """Fix common TOML errors in AI-generated output.
+
+    Handles: unescaped backslashes, newlines inside string values,
+    and unescaped double quotes in description fields.
+    """
+    # Fix unescaped backslashes in string values (e.g. Windows paths C:\path)
+    # Replace single \ (not already escaped \\) with \\
+    text = re.sub(r'(?<!\\)\\(?![\\nt"/])', r'\\\\', text)
+
+    # Fix newlines inside description/rationale string values by joining lines
+    # that don't start a new TOML key
+    lines = text.splitlines()
+    fixed_lines: list[str] = []
+    for line in lines:
+        if (fixed_lines
+                and not re.match(r'^(\[\[criterion\]\]|[a-z_]+\s*=)', line)
+                and not line.strip() == ""
+                and fixed_lines[-1].count('"') % 2 == 1):
+            # This line is a continuation of an unclosed string - join it
+            fixed_lines[-1] = fixed_lines[-1].rstrip() + " " + line.strip()
+        else:
+            fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
+
+
 def parse_dimension_output(raw: str) -> tuple[list[Criterion] | None, str]:
     """Parse AI-generated dimension TOML into Criterion list.
 
@@ -241,11 +342,16 @@ def parse_dimension_output(raw: str) -> tuple[list[Criterion] | None, str]:
     try:
         data = tomllib.loads(cleaned)
     except Exception:
-        # Retry with fixed quotes
+        # Retry with common fixes (backslash, newline, quotes)
         try:
-            data = tomllib.loads(_fix_toml_description_quotes(cleaned))
-        except Exception as e:
-            return None, f"TOML parse error: {e}"
+            fixed = _fix_toml_common_errors(cleaned)
+            data = tomllib.loads(fixed)
+        except Exception:
+            try:
+                fixed = _fix_toml_description_quotes(_fix_toml_common_errors(cleaned))
+                data = tomllib.loads(fixed)
+            except Exception as e:
+                return None, f"TOML parse error: {e}"
 
     items = data.get("criterion", [])
     if not (MIN_CRITERIA_COUNT <= len(items) <= MAX_CRITERIA_COUNT):
@@ -256,6 +362,8 @@ def parse_dimension_output(raw: str) -> tuple[list[Criterion] | None, str]:
 
     for item in items:
         name = item.get("name", "")
+        # Auto-lowercase: AI sometimes generates camelCase names like useCallback_fix
+        name = name.lower()
         if not is_valid_criterion_name(name):
             return None, f"invalid criterion name: {name!r}"
         if name in seen:
@@ -300,25 +408,7 @@ def _build_rescore_prompt(
     dim_table = "\n".join(dim_lines)
 
     # Build task context block if available
-    context_block = ""
-    if task_context:
-        ctx_parts: list[str] = []
-        if task_context.get("project_name"):
-            ctx_parts.append(f"- 项目：{task_context['project_name']}")
-        if task_context.get("language"):
-            ctx_parts.append(f"- 技术栈：{task_context['language']}")
-        if task_context.get("task_type"):
-            ctx_parts.append(f"- 任务类型：{task_context['task_type']}")
-        if task_context.get("task_title"):
-            ctx_parts.append(f"- 任务标题：{task_context['task_title']}")
-        if task_context.get("task_description"):
-            ctx_parts.append(f"- 任务描述：{task_context['task_description']}")
-        if task_context.get("acceptance_criteria"):
-            ctx_parts.append(f"- 验收标准：{task_context['acceptance_criteria']}")
-        if task_context.get("project_summary"):
-            ctx_parts.append(f"- 项目概要：\n{task_context['project_summary']}")
-        if ctx_parts:
-            context_block = "\n## 任务背景\n\n" + "\n".join(ctx_parts) + "\n"
+    context_block = build_context_block(task_context)
 
     return f"""你是评分 AI，负责评价一次 coding-assistant（{model_name}）执行轨迹的质量。
 {context_block}
@@ -337,6 +427,39 @@ def _build_rescore_prompt(
 - weight 必须使用评分模板中指定的权重值（与架构边界/安全合规相关的维度为 2.0，其余为 1.0）
 - description 必须使用上面提供的定制化描述，保持一行字符串，原样复制不得修改
 
+## 高分校准与封顶规则（必须遵守）
+
+评分以 3 分为基准，根据证据上下调整：
+- 3分 = 主路径有推进但有明显缺口
+- 4分 = 主路径基本闭环，仅有轻微问题
+- 5分 = 罕见高分，需要正面证据闭环、无反面证据、无相关 Bad Pattern
+
+以下情况必须封顶：
+- 该维度在轨迹中缺少直接证据 → 最高 3 分；完全无证据 → 通常 2 分以下
+- 任务要求改代码/写文件但轨迹中没有修改证据 → delivery/engineering 维度最高 2 分
+- 任务要求验证但没有运行测试/构建/lint → testing 维度最高 2 分；delivery 维度最高 4 分
+- 仅基于模型最终自述评分，无 tool/file/test 证据 → evidence 维度最高 2 分；相关 delivery 维度最高 3 分
+- 工具报错且未有效补救 → tool_usage 维度最高 3 分；若导致任务未完成则最高 2 分
+- 命中 Bad Pattern → 相关维度通常最高 3 分；严重的最高 2 分
+- 给 5 分时，rationale 必须正面论证为什么没有显著扣分点；如果只能写出模糊夸奖，最高给 4 分
+
+## 轨迹截断公平性（必须遵守）
+
+如果轨迹明显在中途截断（如 followup 未全部执行、对话突然中断、超时终止）：
+- 评分必须基于已完成部分的实际质量，不得因截断导致的不完整而额外惩罚
+- delivery/completeness 类维度可以因任务未完成而合理扣分，但必须在 rationale 中注明"轨迹截断"
+- 其他维度（如 semantic_understanding、tool_usage、context_exploration）应仅评价已执行部分的表现
+- 禁止因截断而给所有维度统一低分——截断前的高质量工作仍应获得相应评价
+- 如果两个模型的轨迹长度差异显著（如一个有 5 轮对话，另一个只有 2 轮），这可能是截断而非能力差异
+
+## 需求变更归因（必须遵守）
+
+如果用户在对话过程中改变了需求（如重命名属性、调整 API 设计、变更功能范围）：
+- 由用户需求变更导致的模型返工/迭代不应视为模型能力不足
+- 应区分"模型自身理解错误导致的返工"和"用户主动变更需求导致的返工"
+- 评价 stage_progression / planning 类维度时，用户需求变更造成的反复不应扣分
+- 模型在需求变更后能快速适应并正确实现新要求，应视为正面表现
+
 ## passrate 约束提示
 
 {passrate_hint}
@@ -350,7 +473,35 @@ def _build_rescore_prompt(
 - 必须引用轨迹中的具体证据：哪些文件被修改、运行了什么命令、出了什么错、遗漏了什么
 - 每条 rationale 必须独立且不同，禁止跨维度复制相似句式
 - 1-3 句话，简洁具体
+- 禁止使用以下套话模式：
+  × "整体看，XXX有一些有效推进，但稳定性和完整性不够"
+  × "这项给X分比较稳/更贴近实际"
+  × "因此给低中档分数" / "所以给中档分"
+  × "推进痕迹是有的，只是前后反复比较多"
+  × "前面先去看了...后面再回到...补细节"
+  × "最终至少落成了...这一类实物"
+  × 任何以"我会给这一项X分"开头的句式
+- 合格示例：
+  ✓ "改了三个文件但漏掉了edge case的单元测试，validate那步直接跳过了"
+  ✓ "prompt里要求加日志，它确实加了logging，但log level全用的INFO，没按要求区分WARNING"
 - 不要提及 task ID 或与另一个模型做比较
+
+## 分数与理由一致性（红线规则）
+
+- rationale 中描述的证据方向必须与分数方向一致
+- 如果 rationale 描述了负面事实（如"没有测试"、"未完成"、"有缺陷"、"不够"、"缺少"），分数不得为 4 或 5
+- 如果 rationale 描述了正面事实（如"完整实现"、"覆盖全面"、"准确定位"），分数不得为 1 或 2
+- 禁止在 rationale 中写"给 X 分"——分数由 score 字段决定，rationale 只陈述事实
+
+## 输出前自检（必须执行）
+
+输出 TOML 前，逐条检查：
+1. 每个 score=5 的维度：rationale 是否有充分正面证据？是否触犯了封顶规则？
+2. 每个 score=1 的维度：rationale 是否确实描述了严重失败？
+3. rationale 中是否存在与 score 方向矛盾的描述？（如负面描述+高分）
+4. 是否有两条以上 rationale 使用了相似句式或模板？如有，必须重写使其独立
+5. description 中定义的各档位标准是否与实际给分对应？
+如发现矛盾，修正分数使其与证据一致，而非修改理由来匹配分数。
 
 ## Bad Pattern 识别
 
@@ -458,9 +609,15 @@ async def _rescore_task(
           f"Type: {task_ctx.get('task_type', '?')}, "
           f"Lang: {task_ctx.get('language', '?')}")
 
+    _CONTEXT_FIELDS = ("prompts", "task_description", "project_summary")
+    if not any(task_ctx.get(f) for f in _CONTEXT_FIELDS):
+        print(f"  [{task_id}] WARNING: no task description available from metadata or prompts, "
+              f"using task_id as fallback context")
+        task_ctx["task_description"] = f"Task {task_id} (no description available)"
+
     # 2. Read JSONL trajectories
-    qwen_jsonl = config.delivery_dir / "trajectories" / "qwen" / f"{task_id}.jsonl"
-    claude_jsonl = config.delivery_dir / "trajectories" / "claude" / f"{task_id}.jsonl"
+    qwen_jsonl = config.resolve_trajectory_path(task_id, "qwen")
+    claude_jsonl = config.resolve_trajectory_path(task_id, "claude")
 
     if not qwen_jsonl.exists() or not claude_jsonl.exists():
         print(f"  [{task_id}] ERROR: Missing JSONL files")
@@ -548,7 +705,7 @@ async def _rescore_task(
     # 5. Write results and validate
     success = True
     for model_name, scored in results.items():
-        output_path = config.delivery_dir / "scores" / model_name / f"{task_id}.quality.toml"
+        output_path = config.score_path(task_id, model_name)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_quality_toml(output_path, scored)
         pr = calc_passrate(scored)
@@ -610,7 +767,7 @@ async def _score_with_criteria(
 
     # Save draft for human review on final failure
     if last_raw:
-        draft_path = config.delivery_dir / "scores" / model_name / f"{task_id}.rescore_draft.txt"
+        draft_path = config.delivery_dir / "scores" / model_name / f"{model_stem(task_id, model_name)}.rescore_draft.txt"
         draft_path.parent.mkdir(parents=True, exist_ok=True)
         draft_path.write_text(last_raw, encoding="utf-8")
         print(f"    [{task_id}/{model_name}] Saved draft to {draft_path.name}")

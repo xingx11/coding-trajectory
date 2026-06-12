@@ -11,6 +11,7 @@ from ctpipe.config import (
     SUBMISSION_KEY_MAP,
     BatchConfig,
     check_passrate_thresholds,
+    model_stem,
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
@@ -47,7 +48,7 @@ def assign_submission_ids(
     return id_map
 
 
-def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None) -> None:
+def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None, *, dry_run: bool = False, as_json: bool = False) -> dict | None:
     state = PipelineState(config.state_path)
     # Always compute submission IDs from the full task list so that
     # sequence numbers stay consistent whether or not --tasks is used.
@@ -56,6 +57,70 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
 
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
+
+    if dry_run:
+        tasks_data = []
+
+        if not as_json:
+            print("=" * 60)
+            print("  DRY RUN: finalize")
+            print("=" * 60)
+            print(f"Delivery: {config.delivery_dir.name}")
+            print(f"Tasks:    {len(tasks)}")
+            print(f"Models:   {', '.join(models)}")
+            print(f"Output:   {config.delivery_dir / 'submission.csv'}")
+
+        for task in tasks:
+            sub_id = submission_ids.get(task.id, task.id)
+            models_info = {}
+            for model_name in models:
+                score_path = config.resolve_score_path(task.id, model_name)
+                collect_info = state.get(task.id, "collect", model_name)
+                run_info = state.get(task.id, "run", model_name)
+                session_id = collect_info.get("session_id", run_info.get("session_id", ""))
+                turns = run_info.get("turns", "?")
+                pr = None
+                if score_path.exists():
+                    try:
+                        criteria = read_quality_toml(score_path)
+                        if criteria and not is_unscored_template(criteria) and is_complete_rubric(criteria):
+                            pr = round(calc_passrate(criteria), 4)
+                    except Exception:
+                        pass
+                jsonl_rel = collect_info.get("jsonl_path", f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}")
+                models_info[model_name] = {
+                    "passrate": pr, "turns": turns,
+                    "session_id": session_id or None,
+                    "trajectory": jsonl_rel,
+                    "score": f"scores/{model_name}/{model_stem(task.id, model_name)}.quality.toml",
+                }
+
+            tasks_data.append({
+                "task_id": task.id, "submission_id": sub_id,
+                "task_type": task.task_type, "domain": task.domain, "language": task.language,
+                "models": models_info,
+            })
+
+            if not as_json:
+                print(f"\n[{task.id}] -> {sub_id}")
+                print(f"  task_type: {task.task_type}  domain: {task.domain}  language: {task.language}")
+                for model_name in models:
+                    info = models_info[model_name]
+                    pr_str = f"{info['passrate']:.4f}" if info["passrate"] is not None else "(no score)"
+                    print(f"  {model_name}: passrate={pr_str}  turns={info['turns']}  session={info['session_id'] or '(none)'}")
+                    print(f"    trajectory: {info['trajectory']}")
+                    print(f"    score:      {info['score']}")
+
+        if as_json:
+            return {
+                "delivery_dir": str(config.delivery_dir),
+                "output": str(config.delivery_dir / "submission.csv"),
+                "tasks": tasks_data,
+                "summary": {"total": len(tasks)},
+            }
+
+        print(f"\nWould write submission.csv with {len(tasks)} row(s)")
+        return
 
     if not tasks:
         print("No tasks found in delivery manifest or tasks.toml; nothing to finalize.")
@@ -69,7 +134,7 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
             row: dict[str, str] = {"id": submission_ids.get(task.id, task.id), "_task_id": task.id}
 
             for model_name in models:
-                score_path = config.delivery_dir / "scores" / model_name / f"{task.id}.quality.toml"
+                score_path = config.resolve_score_path(task.id, model_name)
                 collect_info = state.get(task.id, "collect", model_name)
                 run_info = state.get(task.id, "run", model_name)
 
@@ -77,7 +142,7 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 turns = str(run_info.get("turns", ""))
                 rel_jsonl_path = collect_info.get(
                     "jsonl_path",
-                    f"trajectories/{model_name}/{trajectory_filename(task.id)}",
+                    f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}",
                 )
 
                 jsonl_file = find_delivery_trajectory(
@@ -133,7 +198,7 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 prefix = model_name
                 row[f"{prefix}_trajectory"] = rel_jsonl_path
                 row[f"{prefix}_session_id"] = session_id
-                row[f"{prefix}_score_path"] = f"scores/{model_name}/{task.id}.quality.toml"
+                row[f"{prefix}_score_path"] = f"scores/{model_name}/{model_stem(task.id, model_name)}.quality.toml"
                 row[f"{prefix}_passrate"] = passrate
                 row[f"{prefix}_turns"] = turns
 
@@ -154,8 +219,8 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 claude_pr = float(row.get("claude_passrate") or 0)
             except (ValueError, TypeError):
                 claude_pr = 0.0
-            has_qwen = bool(row.get("qwen_passrate"))
-            has_claude = bool(row.get("claude_passrate"))
+            has_qwen = row.get("qwen_passrate") not in (None, "")
+            has_claude = row.get("claude_passrate") not in (None, "")
 
             task_prefix = f"[{task.id}]"
             task_slash = f"[{task.id}/"
@@ -170,7 +235,7 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
             )
             issues.extend(threshold_issues)
             threshold_ok = len(threshold_issues) == 0
-            if any(not bool(row.get(f"{m}_passrate")) for m in models):
+            if any(row.get(f"{m}_passrate") in (None, "") for m in models):
                 threshold_ok = False
 
             if has_missing_data:

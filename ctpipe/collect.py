@@ -204,7 +204,7 @@ def collect_single(
 
     dest_dir = config.delivery_dir / "trajectories" / model_name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / trajectory_filename(task.id)
+    dest_path = dest_dir / trajectory_filename(task.id, model_name)
     shutil.copy2(jsonl_path, dest_path)
 
     is_recovery = is_salvage or force
@@ -234,10 +234,74 @@ def collect_single(
     return True
 
 
-def collect_all(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None, *, salvage: bool = True, force: bool = False) -> None:
+def collect_all(config: BatchConfig, task_ids: list[str] | None = None, models: list[str] | None = None, *, salvage: bool = True, force: bool = False, dry_run: bool = False, as_json: bool = False) -> dict | None:
     state = PipelineState(config.state_path)
     tasks = select_delivery_tasks(config, task_ids)
     models = models or ["qwen", "claude"]
+
+    if dry_run:
+        items_data = []
+        collectible = 0
+
+        if not as_json:
+            print("=" * 60)
+            print("  DRY RUN: collect")
+            print("=" * 60)
+
+        for task in tasks:
+            if not as_json:
+                print(f"\n[{task.id}]")
+            prepare_info = state.get(task.id, "prepare")
+            for model_name in models:
+                run_info = state.get(task.id, "run", model_name)
+                run_status = run_info.get("status", "")
+                session_id = run_info.get("session_id", "")
+                run_dir = Path(prepare_info.get(f"{model_name}_dir", ""))
+                dest_path = config.delivery_dir / "trajectories" / model_name / trajectory_filename(task.id, model_name)
+                already_done = state.is_done(task.id, "collect", model_name)
+
+                action = "skip"
+                detail = ""
+                if already_done and not force:
+                    action = "already_done"
+                elif force:
+                    action = "force_collect"
+                elif run_status in ("done", "partial"):
+                    action = "collect"
+                    collectible += 1
+                elif salvage and run_status in _SALVAGEABLE_STATUSES:
+                    action = "salvage"
+                    detail = f"run was {run_status}"
+                    collectible += 1
+                else:
+                    action = "skip"
+                    detail = f"run={run_status or 'not_started'}"
+
+                items_data.append({
+                    "task_id": task.id, "model": model_name,
+                    "action": action, "detail": detail,
+                    "run_dir": str(run_dir), "run_dir_exists": run_dir.is_dir(),
+                    "session_id": session_id or None,
+                    "dest": str(dest_path),
+                })
+
+                if not as_json:
+                    detail_txt = f" ({detail})" if detail else ""
+                    print(f"  {model_name}:")
+                    print(f"    action:     {action}{detail_txt}")
+                    print(f"    run_dir:    {run_dir}{' (exists)' if run_dir.is_dir() else ' (missing)'}")
+                    if session_id:
+                        print(f"    session_id: {session_id}")
+                    print(f"    dest:       {dest_path}")
+
+        if as_json:
+            return {
+                "tasks": items_data,
+                "summary": {"total": len(tasks) * len(models), "collectible": collectible},
+            }
+
+        print(f"\nTotal: {len(tasks)} task(s), {collectible} collectible trajectory(ies)")
+        return
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 

@@ -7,35 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch, PropertyMock
 
+from conftest import build_config, make_task
+
 from ctpipe.collect import collect_single
 from ctpipe.config import BatchConfig, ModelConfig, TaskConfig
 from ctpipe.state import PipelineState
 from ctpipe.trajectory import TrajectoryInfo
 
-
-def _build_config(tasks: list[TaskConfig] | None = None) -> BatchConfig:
-    return BatchConfig(
-        delivery_date="20990101",
-        runs_root=Path("D:/runs"),
-        max_parallel=2,
-        tasks=tasks or [],
-        qwen=ModelConfig(auth_token="", base_url="", model="qwen-test"),
-        claude=ModelConfig(auth_token="", base_url="", model="claude-test"),
-    )
-
-
-def _make_task(task_id: str = "CT-0001") -> TaskConfig:
-    return TaskConfig(
-        id=task_id,
-        project_path=Path("D:/projects/demo"),
-        clone_method="git",
-        task_type="bug-fix",
-        domain="web_frontend",
-        language="ts",
-        prompt_qwen="qwen prompt",
-        prompt_claude="claude prompt",
-        bad_pattern="lazy_shortcut",
-    )
 
 
 def _write_jsonl(path: Path, session_id: str, model: str, lines: int = 15) -> None:
@@ -56,11 +34,11 @@ class CollectNormalPathTest(unittest.TestCase):
     """Normal collect: run status=done, start_time and session_id present."""
 
     def test_normal_collect_succeeds_with_status_done(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,11 +63,11 @@ class CollectNormalPathTest(unittest.TestCase):
         self.assertFalse(collect_info.get("salvaged", False))
 
     def test_normal_collect_skips_when_run_not_done(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,11 +85,11 @@ class CollectMissingStartTimeTest(unittest.TestCase):
     """Recovery when start_time is missing: infer from .claude/ file mtimes."""
 
     def test_infers_start_time_from_claude_dir_mtime(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,11 +119,11 @@ class CollectMissingStartTimeTest(unittest.TestCase):
         self.assertEqual(collect_info["status"], "done")
 
     def test_falls_back_to_epoch_when_no_claude_dir(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -173,11 +151,11 @@ class CollectMissingSessionIdTest(unittest.TestCase):
     """Recovery when session_id is missing: infer from newest JSONL in project hash dir."""
 
     def test_infers_session_id_from_project_hash_dir(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -211,11 +189,11 @@ class CollectMissingSessionIdTest(unittest.TestCase):
         self.assertEqual(collect_info["session_id"], "inferred-sess")
 
     def test_proceeds_without_session_id_when_inference_fails(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -248,11 +226,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
     """Salvage mode: run status is 'running' (interrupted), collect recovers partial data."""
 
     def test_salvage_from_running_status_marks_partial(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -281,11 +259,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
         self.assertEqual(collect_info["run_status_at_collect"], "running")
 
     def test_salvage_disabled_skips_interrupted_run(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,11 +277,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
         self.assertFalse(result)
 
     def test_salvage_from_failed_status_marks_partial_with_recovery(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -331,11 +309,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
         self.assertEqual(info["run_status_at_collect"], "failed")
 
     def test_salvage_from_timeout_status_marks_partial(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -361,11 +339,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
 
     def test_salvage_short_trajectory_passes_lowered_threshold(self) -> None:
         """Salvage lowers min lines (3 vs 10): a 4-line trajectory should pass."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -397,11 +375,11 @@ class CollectSalvageFromInterruptedRunTest(unittest.TestCase):
 
     def test_salvage_session_id_mismatch_is_warning_not_failure(self) -> None:
         """In salvage mode, session_id mismatch logs a warning but continues."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,11 +410,11 @@ class CollectForceRecoveryTest(unittest.TestCase):
     """Force recovery via --force: bypass start_time/session_id validation."""
 
     def test_force_with_interrupted_run_marks_partial_and_recovery(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,11 +442,11 @@ class CollectForceRecoveryTest(unittest.TestCase):
 
     def test_force_with_done_run_recollects_as_done(self) -> None:
         """--force on a done run re-collects as done (not salvage), but recovery=True (force flag)."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -497,11 +475,11 @@ class CollectForceRecoveryTest(unittest.TestCase):
 
     def test_force_bypasses_start_time_validation(self) -> None:
         """--force sets start_time=0 and session_id=None for find_trajectory_for_run."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -531,11 +509,11 @@ class CollectForceRecoveryTest(unittest.TestCase):
 
     def test_force_ignores_already_done_check(self) -> None:
         """--force must re-collect even when collect state is already done."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -565,14 +543,14 @@ class CollectRecoveryErrorPathsTest(unittest.TestCase):
     """Recovery flag must be set in state even when collect fails during salvage/force."""
 
     def test_salvage_no_jsonl_marks_skipped_with_recovery(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             run_dir = tmp / "run_claude"
             run_dir.mkdir()
 
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -592,11 +570,11 @@ class CollectRecoveryErrorPathsTest(unittest.TestCase):
         self.assertIn("salvage", info["error"])
 
     def test_salvage_run_dir_missing_marks_failed_with_recovery(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -614,11 +592,11 @@ class CollectRecoveryErrorPathsTest(unittest.TestCase):
         self.assertTrue(info["recovery"])
 
     def test_force_run_dir_missing_marks_failed_with_recovery(self) -> None:
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -636,14 +614,14 @@ class CollectRecoveryErrorPathsTest(unittest.TestCase):
 
     def test_normal_no_jsonl_has_no_recovery(self) -> None:
         """Normal mode + no JSONL → failed WITHOUT recovery."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             run_dir = tmp / "run_claude"
             run_dir.mkdir()
 
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
@@ -663,11 +641,11 @@ class CollectRecoveryErrorPathsTest(unittest.TestCase):
 
     def test_normal_session_mismatch_has_no_recovery(self) -> None:
         """Normal mode + session_id mismatch → failed WITHOUT recovery."""
-        task = _make_task()
+        task = make_task(bad_pattern="lazy_shortcut")
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             with patch.object(BatchConfig, "base_dir", new_callable=PropertyMock, return_value=tmp):
-                config = _build_config([task])
+                config = build_config([task], person_id="")
                 delivery_dir = config.delivery_dir
                 delivery_dir.mkdir(parents=True, exist_ok=True)
 
