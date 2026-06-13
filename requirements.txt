@@ -1,0 +1,10 @@
+# Runtime dependencies for ctpipe (Coding Trajectory pipeline)
+# Install with:  pip install -r requirements.txt
+#
+# Mirrors the runtime deps declared in pyproject.toml ([project].dependencies),
+# plus filelock, which ctpipe/gen.py imports at runtime.
+# Test-only deps (pytest) live in pyproject.toml's [project.optional-dependencies].dev.
+
+requests>=2.28
+openpyxl>=3.1
+filelock>=3.12  # optional: enables file-locking during concurrent `ctpipe gen`; degrades gracefully if absent
