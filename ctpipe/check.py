@@ -10,8 +10,6 @@ import csv
 from pathlib import Path
 
 from ctpipe.config import (
-    MAX_CRITERIA_COUNT,
-    MIN_CRITERIA_COUNT,
     MAX_TURNS,
     MIN_TRAJECTORY_LINES,
     MIN_TURNS,
@@ -21,12 +19,7 @@ from ctpipe.config import (
     select_delivery_tasks,
 )
 from ctpipe.finalize import assign_submission_ids
-from ctpipe.toml_utils import (
-    calc_passrate,
-    is_complete_rubric,
-    is_unscored_template,
-    read_quality_toml,
-)
+from ctpipe.toml_utils import read_quality_toml, safe_calc_passrate
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 QWEN_MODEL_KEYWORDS = ("qwen",)
@@ -42,8 +35,8 @@ _POS_KEYWORDS = ("完整实现", "全部完成", "准确定位", "正确修复",
                  "成功修复", "成功实现", "精准定位", "全面覆盖")
 
 
-def _count_turns(jsonl_path: Path) -> tuple[int, list[str], str, set[str]]:
-    """Parse trajectory JSONL and return (turn_count, models, session_id, issues)."""
+def _count_turns(jsonl_path: Path) -> tuple[int, list[str], str, str, set[str]]:
+    """Parse trajectory JSONL and return (turn_count, models, session_id, first_user_query, issues)."""
     info = parse_trajectory(jsonl_path)
     issues: set[str] = set()
     if info.line_count < MIN_TRAJECTORY_LINES:
@@ -52,7 +45,7 @@ def _count_turns(jsonl_path: Path) -> tuple[int, list[str], str, set[str]]:
         issues.add("no session_id found in trajectory")
     if not info.models:
         issues.add("no model identifiers found in trajectory")
-    return info.user_turns, sorted(info.models), info.session_id, issues
+    return info.user_turns, sorted(info.models), info.session_id, info.first_user_query, issues
 
 
 def _check_model_identity(models: list[str], expected: str) -> str | None:
@@ -105,6 +98,7 @@ def check(
     for task in tasks:
         task_stats: dict[str, str] = {}
         parsed_criteria: dict[str, list] = {}  # model -> list[Criterion]
+        first_queries: dict[str, str] = {}  # model -> first user query text
         sub_id = submission_id_map.get(task.id, task.id)
         row = submission_rows.get(sub_id)
 
@@ -117,7 +111,7 @@ def check(
                 issues.append(f"{prefix} trajectory file missing")
                 continue
 
-            user_turns, detected_models, session_id, traj_issues = _count_turns(traj_path)
+            user_turns, detected_models, session_id, first_query, traj_issues = _count_turns(traj_path)
 
             for ti in traj_issues:
                 issues.append(f"{prefix} {ti}")
@@ -134,6 +128,8 @@ def check(
             task_stats[f"{model_name}_turns"] = str(user_turns)
             task_stats[f"{model_name}_models"] = ",".join(detected_models[:3])
             task_stats[f"{model_name}_session"] = session_id[:12] + "..." if len(session_id) > 12 else session_id
+            if first_query:
+                first_queries[model_name] = first_query
 
             # --- Session ID cross-check ---
             if row and session_id:
@@ -146,38 +142,16 @@ def check(
 
             # --- Score checks ---
             score_path = config.resolve_score_path(task.id, model_name)
-            if not score_path.exists():
-                issues.append(f"{prefix} score file missing")
+            passrate, score_err = safe_calc_passrate(score_path)
+            if passrate is None:
+                issues.append(f"{prefix} {score_err}")
                 continue
 
-            try:
-                criteria = read_quality_toml(score_path)
-            except Exception as exc:
-                issues.append(f"{prefix} score file parse error: {exc}")
-                continue
-
-            if is_unscored_template(criteria):
-                issues.append(f"{prefix} score file is still an unscored template")
-                continue
-
-            if not (MIN_CRITERIA_COUNT <= len(criteria) <= MAX_CRITERIA_COUNT):
-                issues.append(f"{prefix} wrong criteria count: {len(criteria)} (expected {MIN_CRITERIA_COUNT}-{MAX_CRITERIA_COUNT})")
-                continue
-
+            criteria = read_quality_toml(score_path)
             for i, c in enumerate(criteria, 1):
                 if not is_valid_criterion_name(c.name):
                     issues.append(f"{prefix} criterion {i}: invalid name {c.name!r}")
-                if c.score < 1 or c.score > 5:
-                    issues.append(f"{prefix} criterion {i} ({c.name}): score {c.score} out of range 1-5")
-                if not c.rationale:
-                    issues.append(f"{prefix} criterion {i} ({c.name}): missing rationale")
 
-            if not is_complete_rubric(criteria):
-                scored_n = sum(1 for c in criteria if c.score >= 1 and c.rationale)
-                issues.append(f"{prefix} incomplete scoring: {scored_n}/{len(criteria)} criteria filled")
-                continue
-
-            passrate = calc_passrate(criteria)
             task_stats[f"{model_name}_passrate"] = f"{passrate:.4f}"
             task_stats[f"{model_name}_criteria"] = ",".join(c.name for c in criteria)
             parsed_criteria[model_name] = criteria
@@ -213,6 +187,16 @@ def check(
                             issues.append(
                                 f"{prefix} passrate mismatch: csv={csv_pr} vs computed={passrate:.4f}"
                             )
+
+        # --- B1-d: Cross-model first-query consistency check ---
+        if len(first_queries) == 2:
+            q_query = first_queries.get("qwen", "")
+            c_query = first_queries.get("claude", "")
+            if q_query and c_query and q_query != c_query:
+                issues.append(
+                    f"[{task.id}] B1-d: first user query differs between qwen and claude "
+                    f"(qwen={q_query[:60]!r}... vs claude={c_query[:60]!r}...)"
+                )
 
         # --- Cross-model paired consistency check ---
         qwen_names = set(filter(None, task_stats.get("qwen_criteria", "").split(",")))

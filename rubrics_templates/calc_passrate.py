@@ -11,12 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from ctpipe.toml_utils import (
-    calc_passrate,
-    is_complete_rubric,
-    is_unscored_template,
-    read_quality_toml,
-)
+from ctpipe.toml_utils import safe_calc_passrate
 
 
 def main() -> int:
@@ -41,40 +36,11 @@ def main() -> int:
 
     has_issue = False
     for path in files:
-        try:
-            criteria = read_quality_toml(path)
-        except Exception as exc:
-            print(f"{path}: ERROR: {exc}", file=sys.stderr)
-            return 1
-
-        if not criteria:
-            print(f"{path}: ERROR: no [[criterion]] entries", file=sys.stderr)
-            return 1
-
-        if is_unscored_template(criteria):
-            print(
-                f"{path}: UNSCORED — all {len(criteria)} criteria have "
-                f"score=0 and empty rationale",
-                file=sys.stderr,
-            )
+        rate, err = safe_calc_passrate(path)
+        if rate is None:
+            print(f"{path}: ERROR: {err}", file=sys.stderr)
             has_issue = True
             continue
-
-        if not is_complete_rubric(criteria):
-            scored_n = sum(1 for c in criteria if c.score >= 1 and c.rationale)
-            print(
-                f"{path}: INCOMPLETE — {scored_n}/{len(criteria)} criteria "
-                f"fully scored",
-                file=sys.stderr,
-            )
-            has_issue = True
-            continue
-
-        try:
-            rate = calc_passrate(criteria)
-        except Exception as exc:
-            print(f"{path}: ERROR: {exc}", file=sys.stderr)
-            return 1
         print(f"{path}: {rate:.4f}")
 
     if args.strict and has_issue:

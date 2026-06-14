@@ -30,6 +30,12 @@ from ctpipe.project_scan import scan_project
 # Default timeouts for gen stages (seconds)
 _GEN_TOTAL_TIMEOUT = 900
 _GEN_STEP_TIMEOUT = 180
+# Criteria customization gets a dedicated budget so it is never starved by
+# stage1/stage2 having already consumed the shared per-batch total_timeout.
+_GEN_CRITERIA_TIMEOUT = 180
+# Backoff (seconds) before retrying a stage after an empty/timeout response,
+# to avoid hammering a slow upstream endpoint on immediate retry.
+_GEN_RETRY_BACKOFF = 4
 
 # Process-internal lock fallback when filelock is not installed
 _repo_lock = threading.Lock()
@@ -50,20 +56,19 @@ Return ONLY a valid JSON array (no markdown):
 
 EXPAND_PROMPT = """Expand this task idea into a full specification.
 
-CRITICAL — Language & style rules for prompt_qwen, prompt_claude, followups_qwen, followups_claude:
+CRITICAL — Language & style rules for prompt, followups_qwen, followups_claude:
 1. ALL prompts and followups MUST be written in Chinese (简体中文).
 2. Write them as a real human developer would type into an AI coding assistant — short, casual, natural.
-3. The initial prompt (prompt_qwen / prompt_claude) should be ONE short sentence describing the overall goal, like a developer's first message. Examples: "帮我给这个项目加一个命令行状态查看功能", "这个项目有个并发 bug，帮我修一下". Do NOT include long requirement lists in the initial prompt.
+3. The initial prompt should be ONE short sentence describing the overall goal, like a developer's first message. Examples: "帮我给这个项目加一个命令行状态查看功能", "这个项目有个并发 bug，帮我修一下". Do NOT include long requirement lists in the initial prompt.
 4. followups are progressive refinements — each one asks for ONE specific next step, building on what the previous prompt/followup asked for. They should read like a natural conversation: "现在加上颜色显示", "再写几个测试", "处理一下边界情况". Keep each followup to 1-2 short sentences max.
-5. prompt_qwen and prompt_claude describe the same task but may be phrased slightly differently. followups_qwen and followups_claude must have the SAME number of items (3-4 items each).
+5. The prompt field is shared by BOTH models (qwen and claude receive the EXACT same first message). followups_qwen and followups_claude must have the SAME number of items (3-4 items each).
 6. Do NOT start prompts with boilerplate like "你正在一个本地项目目录中工作" or any formulaic prefix. Just state the request directly.
 7. The progressive flow should be: initial prompt = broad goal → followup 1 = core implementation detail → followup 2 = enhancement or edge case → followup 3+ = testing, polish, docs.
-8. prompt_qwen and prompt_claude must convey the same information and same difficulty level. Do NOT give one model extra hints, file paths, or technical details that the other does not receive. Both prompts should allow the model to succeed or fail based on its own capability, not based on information asymmetry.
-9. followups for both models must cover the same functional areas in the same order. The phrasing may differ but the substantive requirements must be equivalent. Do NOT give one model easier or more specific sub-tasks.
-10. Do NOT reference files, functions, or technical details in prompts that do not actually exist in the project. If a prompt mentions a specific file path or class name, it must be verifiable in the codebase.
+8. followups for both models must cover the same functional areas in the same order. The phrasing may differ but the substantive requirements must be equivalent. Do NOT give one model easier or more specific sub-tasks.
+9. Do NOT reference files, functions, or technical details in prompts that do not actually exist in the project. If a prompt mentions a specific file path or class name, it must be verifiable in the codebase.
 
 Return ONLY valid JSON (no markdown):
-{"prompt_qwen":"...","prompt_claude":"...","followups_qwen":["..."],"followups_claude":["..."]}"""
+{"prompt":"...","followups_qwen":["..."],"followups_claude":["..."]}"""
 
 
 async def _call_claude_p(
@@ -223,16 +228,33 @@ def _parse_gen_output(raw: str) -> dict | None:
     if not isinstance(data, dict):
         return None
 
-    required = ["prompt_qwen", "prompt_claude", "followups_qwen",
-                 "followups_claude"]
-    if not all(k in data for k in required):
-        return None
-    if not isinstance(data["followups_qwen"], list) or len(data["followups_qwen"]) < 2:
-        return None
-    if not isinstance(data["followups_claude"], list) or len(data["followups_claude"]) < 3:
-        return None
+    # New format: single "prompt" field
+    if "prompt" in data:
+        required = ["prompt", "followups_qwen", "followups_claude"]
+        if not all(k in data for k in required):
+            return None
+        if not isinstance(data["followups_qwen"], list) or len(data["followups_qwen"]) < 2:
+            return None
+        if not isinstance(data["followups_claude"], list) or len(data["followups_claude"]) < 3:
+            return None
+        return data
 
-    return data
+    # Backward compat: old format with prompt_qwen/prompt_claude
+    if "prompt_qwen" in data:
+        required = ["prompt_qwen", "prompt_claude", "followups_qwen",
+                     "followups_claude"]
+        if not all(k in data for k in required):
+            return None
+        if not isinstance(data["followups_qwen"], list) or len(data["followups_qwen"]) < 2:
+            return None
+        if not isinstance(data["followups_claude"], list) or len(data["followups_claude"]) < 3:
+            return None
+        # Merge into single prompt (use prompt_qwen as canonical)
+        data["prompt"] = data.pop("prompt_qwen")
+        data.pop("prompt_claude", None)
+        return data
+
+    return None
 
 
 def _next_task_id(config: BatchConfig) -> str:
@@ -416,8 +438,7 @@ def _format_toml_entry(
     task_type: str,
     domain: str,
     language: str,
-    prompt_qwen: str,
-    prompt_claude: str,
+    prompt: str,
     followups_qwen: list[str],
     followups_claude: list[str],
     task_title: str = "",
@@ -449,9 +470,8 @@ def _format_toml_entry(
         parts.append(f'acceptance_criteria = {fmt_followups(acceptance_criteria)}\n')
 
     parts.append(
-        f'prompt_qwen = """{escape_toml_multiline(prompt_qwen)}"""\n'
+        f'prompt = """{escape_toml_multiline(prompt)}"""\n'
         f'followups_qwen = {fmt_followups(followups_qwen)}\n'
-        f'prompt_claude = """{escape_toml_multiline(prompt_claude)}"""\n'
         f'followups_claude = {fmt_followups(followups_claude)}\n'
     )
 
@@ -636,6 +656,7 @@ async def generate_single(
     stage1_timeout = min(_GEN_STEP_TIMEOUT,int(remaining * 0.4))
     for attempt in range(2):
         if attempt > 0:
+            await asyncio.sleep(_GEN_RETRY_BACKOFF)
             print(f"  [{_elapsed()}] [stage 1 retry] Retrying idea generation...")
         idea_raw = await _call_gen_idea(summary, slot.task_type, slot.domain, slot.language, env, model=config.claude.model, timeout=stage1_timeout)
         if not idea_raw:
@@ -682,10 +703,11 @@ async def generate_single(
         print(f"  [{_elapsed()}] ERROR: stage 2 failed after retries, saved to {draft_path.name}")
         return False
 
-    remaining_crit = max(30, int(total_timeout - (time.time() - t_start)))
+    # Dedicated timeout: criteria must not inherit the (possibly exhausted)
+    # remaining budget, otherwise it gets floored to ~30s and always times out.
     custom = await _gen_customize_criteria(
         summary, idea, slot.task_type, slot.domain, slot.language,
-        env, model=config.claude.model, timeout=min(_GEN_STEP_TIMEOUT,remaining_crit),
+        env, model=config.claude.model, timeout=_GEN_CRITERIA_TIMEOUT,
         project_name=project_path.name,
     )
     _write_rubric_templates(config, task_id, custom_criteria=custom)
@@ -698,8 +720,7 @@ async def generate_single(
         task_type=slot.task_type,
         domain=slot.domain,
         language=slot.language,
-        prompt_qwen=data["prompt_qwen"],
-        prompt_claude=data["prompt_claude"],
+        prompt=data["prompt"],
         followups_qwen=data["followups_qwen"],
         followups_claude=data["followups_claude"],
         task_title=idea.get("task_title", ""),
@@ -832,6 +853,7 @@ async def generate_batch(
     stage1_timeout = min(240, int(remaining * 0.3))
     for attempt in range(2):
         if attempt > 0:
+            await asyncio.sleep(_GEN_RETRY_BACKOFF)
             print(f"  [{_elapsed()}] [stage 1 retry] Retrying batch idea generation...")
         sem_ctx = api_sem if api_sem else nullcontext()
         async with sem_ctx:
@@ -938,12 +960,17 @@ async def generate_batch(
             print(f"  [{_elapsed()}] [{task_id}] Stage 2 failed, saved draft")
             return False
 
-        remaining_crit = max(30, int(total_timeout - (time.time() - t_start)))
-        custom = await _gen_customize_criteria(
-            summary, idea, s.task_type, s.domain, s.language,
-            env, model=config.claude.model, timeout=min(_GEN_STEP_TIMEOUT,remaining_crit),
-            project_name=project_path.name,
-        )
+        # Dedicated timeout + respect the concurrency limit. Previously this
+        # used the leftover shared budget (floored to 30s -> guaranteed timeout
+        # -> generic template) and bypassed the semaphore (all tasks' criteria
+        # fired at once, overloading a slow endpoint).
+        sem_ctx = api_sem if api_sem else nullcontext()
+        async with sem_ctx:
+            custom = await _gen_customize_criteria(
+                summary, idea, s.task_type, s.domain, s.language,
+                env, model=config.claude.model, timeout=_GEN_CRITERIA_TIMEOUT,
+                project_name=project_path.name,
+            )
         _write_rubric_templates(config, task_id, custom_criteria=custom)
 
         project_path_str = str(project_path).replace("\\", "\\\\")
@@ -954,8 +981,7 @@ async def generate_batch(
             task_type=s.task_type,
             domain=s.domain,
             language=s.language,
-            prompt_qwen=data["prompt_qwen"],
-            prompt_claude=data["prompt_claude"],
+            prompt=data["prompt"],
             followups_qwen=data["followups_qwen"],
             followups_claude=data["followups_claude"],
             task_title=idea.get("task_title", ""),

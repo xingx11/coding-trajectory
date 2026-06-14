@@ -29,8 +29,7 @@ def _task(task_id: str = "T1") -> TaskConfig:
         task_type="feature",
         domain="d",
         language="py",
-        prompt_qwen="q",
-        prompt_claude="c",
+        prompt="q",
     )
 
 

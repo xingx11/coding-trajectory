@@ -29,8 +29,7 @@ class TaskConfig:
     task_type: str
     domain: str
     language: str
-    prompt_qwen: str
-    prompt_claude: str
+    prompt: str
     followups_qwen: list[str] = field(default_factory=list)
     followups_claude: list[str] = field(default_factory=list)
     bad_pattern: str = ""
@@ -50,8 +49,7 @@ class TaskConfig:
             "task_type": self.task_type,
             "domain": self.domain,
             "language": self.language,
-            "prompt_qwen": self.prompt_qwen,
-            "prompt_claude": self.prompt_claude,
+            "prompt": self.prompt,
             "followups_qwen": list(self.followups_qwen),
             "followups_claude": list(self.followups_claude),
             "bad_pattern": self.bad_pattern,
@@ -62,6 +60,10 @@ class TaskConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> TaskConfig:
+        # Backward compat: old format had prompt_qwen/prompt_claude, new has prompt
+        prompt = str(data.get("prompt", ""))
+        if not prompt:
+            prompt = str(data.get("prompt_qwen", data.get("prompt_claude", "")))
         return cls(
             id=str(data["id"]),
             project_path=Path(str(data["project_path"])),
@@ -69,8 +71,7 @@ class TaskConfig:
             task_type=str(data["task_type"]),
             domain=str(data["domain"]),
             language=str(data["language"]),
-            prompt_qwen=str(data["prompt_qwen"]),
-            prompt_claude=str(data["prompt_claude"]),
+            prompt=prompt,
             followups_qwen=[str(item) for item in data.get("followups_qwen", [])],
             followups_claude=[str(item) for item in data.get("followups_claude", [])],
             bad_pattern=str(data.get("bad_pattern", "")),
@@ -494,6 +495,10 @@ def build_claude_env(model_config: ModelConfig) -> dict[str, str]:
     for key, val in os.environ.items():
         if any(key == prefix or key.startswith(prefix) for prefix in _SAFE_ENV_PREFIXES):
             env[key] = val
+    # Remove inherited CLAUDE_CODE_* vars from a parent Claude Code session
+    # to prevent project directory inheritance; the pipeline sets its own below.
+    for key in [k for k in env if k.startswith("CLAUDE_CODE_")]:
+        del env[key]
     if model_config.auth_token:
         env["ANTHROPIC_AUTH_TOKEN"] = model_config.auth_token
     env.update({
@@ -579,6 +584,10 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
 
     tasks: list[TaskConfig] = []
     for t in data.get("task", []):
+        # Backward compat: old format had prompt_qwen/prompt_claude
+        prompt = t.get("prompt", "")
+        if not prompt:
+            prompt = t.get("prompt_qwen", t.get("prompt_claude", ""))
         tasks.append(TaskConfig(
             id=t["id"],
             project_path=Path(t["project_path"]),
@@ -586,8 +595,7 @@ def load_config(tasks_toml: Path, env_path: Path) -> BatchConfig:
             task_type=t["task_type"],
             domain=t["domain"],
             language=t["language"],
-            prompt_qwen=t["prompt_qwen"],
-            prompt_claude=t["prompt_claude"],
+            prompt=prompt,
             followups_qwen=t.get("followups_qwen", []),
             followups_claude=t.get("followups_claude", []),
             bad_pattern=t.get("bad_pattern", ""),

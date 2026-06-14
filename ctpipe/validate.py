@@ -13,7 +13,7 @@ from ctpipe.config import (
     select_delivery_tasks,
 )
 from ctpipe.finalize import assign_submission_ids
-from ctpipe.toml_utils import calc_passrate, is_complete_rubric, is_unscored_template, read_quality_toml
+from ctpipe.toml_utils import read_quality_toml, safe_calc_passrate
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 
@@ -132,6 +132,8 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
 
         # Cache passrates from score reads for threshold checking below
         cached_passrates: dict[str, float] = {}
+        cached_criteria: dict[str, list] = {}  # for cross-model checks (A3-f)
+        cached_first_queries: dict[str, str] = {}  # for B1-d query consistency
 
         for model_name in models:
             trajectory_path = find_delivery_trajectory(delivery_dir, model_name, task.id)
@@ -159,6 +161,8 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 issues.append(
                     f"[{task.id}/{model_name}] provider mismatch: detected {info.detected_provider}"
                 )
+            if info.first_user_query:
+                cached_first_queries[model_name] = info.first_user_query
 
             expected_rel = f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}"
             actual_rel = trajectory_path.relative_to(delivery_dir).as_posix()
@@ -188,30 +192,14 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                     )
 
             score_path = config.resolve_score_path(task.id, model_name)
-            if not score_path.exists():
-                issues.append(f"[{task.id}/{model_name}] score file missing: {score_path.name}")
+            pr, score_err = safe_calc_passrate(score_path)
+            if pr is None:
+                issues.append(f"[{task.id}/{model_name}] {score_err}")
                 continue
 
-            try:
-                criteria = read_quality_toml(score_path)
-            except Exception as exc:
-                issues.append(f"[{task.id}/{model_name}] score read error: {exc}")
-                continue
-
-            if is_unscored_template(criteria):
-                issues.append(f"[{task.id}/{model_name}] score file is unscored template: {score_path.name}")
-                continue
-
-            if not is_complete_rubric(criteria):
-                scored_count = sum(1 for c in criteria if c.score >= 1 and c.rationale)
-                issues.append(
-                    f"[{task.id}/{model_name}] score file incomplete: "
-                    f"{scored_count}/{len(criteria)} criteria scored"
-                )
-                continue
-
-            pr = calc_passrate(criteria)
+            criteria = read_quality_toml(score_path)
             cached_passrates[model_name] = pr
+            cached_criteria[model_name] = criteria
             passrate = f"{pr:.4f}"
             if row:
                 csv_pr = row.get(f"{model_name} passrate", "")
@@ -228,6 +216,15 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                             f"{csv_pr!r} != {passrate!r}"
                         )
 
+        # B1-d: first user query must be identical between qwen and claude
+        if len(cached_first_queries) == 2:
+            q_query = cached_first_queries.get("qwen", "")
+            c_query = cached_first_queries.get("claude", "")
+            if q_query and c_query and q_query != c_query:
+                issues.append(
+                    f"[{task.id}] B1-d: first user query differs between qwen and claude"
+                )
+
         # Threshold checks using cached passrates (no re-read needed)
         qwen_pr = cached_passrates.get("qwen", 0.0)
         claude_pr = cached_passrates.get("claude", 0.0)
@@ -237,6 +234,17 @@ def validate(config: BatchConfig, task_ids: list[str] | None = None, models: lis
         issues.extend(check_passrate_thresholds(
             task.id, qwen_pr, claude_pr, has_qwen, has_claude,
         ))
+
+        # A3-f: at least 1 dimension with equal qwen/claude scores (non-bias evidence)
+        if "qwen" in cached_criteria and "claude" in cached_criteria:
+            qwen_scores = {c.name: c.score for c in cached_criteria["qwen"]}
+            claude_scores = {c.name: c.score for c in cached_criteria["claude"]}
+            shared_dims = set(qwen_scores) & set(claude_scores)
+            if shared_dims and not any(qwen_scores[d] == claude_scores[d] for d in shared_dims):
+                issues.append(
+                    f"[{task.id}] A3-f: no dimension has equal qwen/claude scores — "
+                    f"may indicate biased scoring"
+                )
 
     print("\nValidation summary")
     print("=" * 60)

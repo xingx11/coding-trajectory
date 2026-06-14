@@ -475,8 +475,7 @@ project_path = "D:/projects/demo"
 task_type = "bug-fix"
 domain = "web_frontend"
 language = "ts"
-prompt_qwen = "fix it"
-prompt_claude = "fix it"
+prompt = "fix it"
 """
 
     @classmethod
@@ -495,6 +494,12 @@ prompt_claude = "fix it"
                     cls._BASH = path
                     return
         raise unittest.SkipTest("bash not available")
+
+    def tearDown(self) -> None:
+        import shutil
+        delivery = self._PROJECT_ROOT / "delivery_20990101"
+        if delivery.exists():
+            shutil.rmtree(delivery, ignore_errors=True)
 
     @staticmethod
     def _to_bash_path(p: Path) -> str:

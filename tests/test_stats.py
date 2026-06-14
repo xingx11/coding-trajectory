@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ctpipe.state import PipelineState
 from ctpipe.stats import (
+    _collect_passrate_diff,
     _collect_timing_stats,
     _find_slowest,
     _fmt_duration,
@@ -139,6 +140,199 @@ class TestFindSlowest(unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertEqual(result, ("T1", "qwen", 42.5))
+
+
+class TestCollectPassrateDiff(unittest.TestCase):
+    def _make_state(self, tmp: Path) -> PipelineState:
+        return PipelineState(tmp / "pipeline_state.json")
+
+    def _set_pr(self, state, tid, qwen=None, claude=None):
+        kwargs = {}
+        if qwen is not None:
+            kwargs["qwen_passrate"] = qwen
+        if claude is not None:
+            kwargs["claude_passrate"] = claude
+        state.set(tid, "finalize", **kwargs)
+
+    def test_three_buckets_partition(self):
+        # claude>qwen (x2), tie, claude<qwen -> positive/negative/tie are
+        # disjoint and sum to count. (A tie must NOT be folded into negative.)
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.5, claude=0.8)  # claude > qwen
+            self._set_pr(state, "T2", qwen=0.4, claude=0.9)  # claude > qwen
+            self._set_pr(state, "T3", qwen=0.6, claude=0.6)  # tie
+            self._set_pr(state, "T4", qwen=0.7, claude=0.5)  # claude < qwen
+
+            res = _collect_passrate_diff(
+                state, ["T1", "T2", "T3", "T4"], "qwen", "claude"
+            )
+
+            self.assertIsNotNone(res)
+            self.assertEqual(res["count"], 4)
+            self.assertEqual(res["positive"], 2)
+            self.assertEqual(res["negative"], 1)
+            self.assertEqual(res["tie"], 1)
+            # The three buckets partition every paired task exactly once.
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+
+    def test_all_ties(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.5, claude=0.5)
+            self._set_pr(state, "T2", qwen=0.7, claude=0.7)
+
+            res = _collect_passrate_diff(state, ["T1", "T2"], "qwen", "claude")
+
+            self.assertEqual(res["positive"], 0)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 2)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+            self.assertAlmostEqual(res["mean"], 0.0)
+
+    def test_single_tie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.6, claude=0.6)
+
+            res = _collect_passrate_diff(state, ["T1"], "qwen", "claude")
+
+            self.assertEqual(res["count"], 1)
+            self.assertEqual(res["positive"], 0)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 1)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+            self.assertAlmostEqual(res["mean"], 0.0)
+
+    def test_unpaired_excluded(self):
+        # Tasks missing one model's passrate are not paired -> 0 pairs -> None.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.5)            # claude missing
+            self._set_pr(state, "T2", claude=0.8)          # qwen missing
+
+            res = _collect_passrate_diff(state, ["T1", "T2"], "qwen", "claude")
+
+            self.assertIsNone(res)
+
+    def test_mean_direction(self):
+        # diff is model_b - model_a == claude - qwen.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.5, claude=0.8)  # +0.3
+            self._set_pr(state, "T2", qwen=0.4, claude=0.6)  # +0.2
+
+            res = _collect_passrate_diff(state, ["T1", "T2"], "qwen", "claude")
+
+            self.assertAlmostEqual(res["mean"], 0.25)
+            self.assertEqual(res["positive"], 2)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 0)
+
+    def test_all_positive(self):
+        # Every task: claude > qwen -> all diffs positive, zero negative/tie.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.4, claude=0.7)  # +0.3
+            self._set_pr(state, "T2", qwen=0.5, claude=0.9)  # +0.4
+            self._set_pr(state, "T3", qwen=0.6, claude=0.8)  # +0.2
+
+            res = _collect_passrate_diff(
+                state, ["T1", "T2", "T3"], "qwen", "claude"
+            )
+
+            self.assertEqual(res["count"], 3)
+            self.assertEqual(res["positive"], 3)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 0)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+            self.assertGreater(res["mean"], 0)
+
+    def test_all_negative(self):
+        # Every task: claude < qwen -> all diffs negative, zero positive/tie.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.8, claude=0.5)  # -0.3
+            self._set_pr(state, "T2", qwen=0.9, claude=0.6)  # -0.3
+            self._set_pr(state, "T3", qwen=0.7, claude=0.4)  # -0.3
+
+            res = _collect_passrate_diff(
+                state, ["T1", "T2", "T3"], "qwen", "claude"
+            )
+
+            self.assertEqual(res["count"], 3)
+            self.assertEqual(res["positive"], 0)
+            self.assertEqual(res["negative"], 3)
+            self.assertEqual(res["tie"], 0)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+            self.assertLess(res["mean"], 0)
+
+    def test_single_positive(self):
+        # Single paired task where claude > qwen.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.4, claude=0.8)
+
+            res = _collect_passrate_diff(state, ["T1"], "qwen", "claude")
+
+            self.assertIsNotNone(res)
+            self.assertEqual(res["count"], 1)
+            self.assertEqual(res["positive"], 1)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 0)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+
+    def test_single_negative(self):
+        # Single paired task where claude < qwen.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            self._set_pr(state, "T1", qwen=0.8, claude=0.4)
+
+            res = _collect_passrate_diff(state, ["T1"], "qwen", "claude")
+
+            self.assertIsNotNone(res)
+            self.assertEqual(res["count"], 1)
+            self.assertEqual(res["positive"], 0)
+            self.assertEqual(res["negative"], 1)
+            self.assertEqual(res["tie"], 0)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
+
+    def test_floating_point_tie(self):
+        # Passrates that are equal at 4-decimal precision but could differ by
+        # a floating-point artefact (e.g. 0.3333 vs 0.3333 stored as slightly
+        # different IEEE 754 values). The round() inside _collect_passrate_diff
+        # must normalise them so diff == 0.0 and the task lands in the tie
+        # bucket rather than leaking into positive or negative.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = self._make_state(Path(tmp))
+            # Simulate values that could arise from float("0.3333"):
+            # one exact, one nudged by a ULP-scale epsilon.
+            self._set_pr(state, "T1", qwen=0.3333, claude=0.3333 + 1e-15)
+            self._set_pr(state, "T2", qwen=0.6667 + 1e-16, claude=0.6667)
+
+            res = _collect_passrate_diff(state, ["T1", "T2"], "qwen", "claude")
+
+            self.assertEqual(res["count"], 2)
+            self.assertEqual(res["positive"], 0)
+            self.assertEqual(res["negative"], 0)
+            self.assertEqual(res["tie"], 2)
+            self.assertEqual(
+                res["positive"] + res["negative"] + res["tie"], res["count"]
+            )
 
 
 if __name__ == "__main__":

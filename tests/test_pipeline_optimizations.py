@@ -69,8 +69,7 @@ class PipelineOptimizationTests(unittest.TestCase):
             task_type="bug-fix",
             domain="web_frontend",
             language="ts",
-            prompt_qwen="qwen prompt",
-            prompt_claude="claude prompt",
+            prompt="test prompt",
             followups_qwen=["f1"],
             followups_claude=["f1", "f2"],
         )
@@ -83,7 +82,7 @@ class PipelineOptimizationTests(unittest.TestCase):
                 selected = select_delivery_tasks(config, ["CT-0007"])
 
         self.assertEqual([task.id for task in selected], ["CT-0007"])
-        self.assertEqual(selected[0].prompt_claude, "claude prompt")
+        self.assertEqual(selected[0].prompt, "test prompt")
 
 
 class BatchResetNoIntermediateSaveTest(unittest.TestCase):
@@ -667,12 +666,8 @@ class FinalizeSingleModelThresholdTest(unittest.TestCase):
                           jsonl_path=f"trajectories/qwen/{task.id}.jsonl", session_id="s1")
                 state.save()
 
-                criteria = [
-                    Criterion(f"c{i}", "desc", "likert", 5, 1.0, 3, "ok") for i in range(7)
-                ]
-
                 with patch("ctpipe.finalize.find_delivery_trajectory", return_value=traj_file), \
-                     patch("ctpipe.finalize.read_quality_toml", return_value=criteria):
+                     patch("ctpipe.finalize.safe_calc_passrate", return_value=(21.0 / 35.0, "")):
                     finalize(config, models=["qwen"])
 
                 state2 = PipelineState(delivery_dir / "pipeline_state.json")

@@ -41,11 +41,22 @@ def _sanitize_run_dir(run_dir: Path) -> None:
             md_path.unlink()
             print(f"  [security] Removed untrusted {md_name} from {run_dir.name}")
 
-    # Rebuild pipeline's trusted settings
+    # Rebuild pipeline's trusted settings, merging user-level hooks
     claude_dir.mkdir(parents=True, exist_ok=True)
     from ctpipe.prepare import SETTINGS_LOCAL
+    local_settings = dict(SETTINGS_LOCAL)
+    # Inject hooks from user-level settings so otel instrumentation works
+    # (we only take "hooks" — not env/model which would override pipeline config)
+    user_settings_path = Path.home() / ".claude" / "settings.json"
+    if user_settings_path.is_file():
+        try:
+            user_settings = json.loads(user_settings_path.read_text("utf-8"))
+            if "hooks" in user_settings:
+                local_settings["hooks"] = user_settings["hooks"]
+        except (json.JSONDecodeError, OSError):
+            pass
     (claude_dir / "settings.local.json").write_text(
-        json.dumps(SETTINGS_LOCAL, indent=2), encoding="utf-8",
+        json.dumps(local_settings, indent=2), encoding="utf-8",
     )
 
 
@@ -287,7 +298,12 @@ async def run_task_model(
         print(f"[{task.id}/{model_name}] run already done, skipping")
         return
 
-    run_dir = Path(prepare_info.get(f"{model_name}_dir", ""))
+    run_dir_str = prepare_info.get(f"{model_name}_dir", "")
+    if not run_dir_str:
+        print(f"[{task.id}/{model_name}] ERROR: prepare not done (no {model_name}_dir in state). Run 'prepare' first.")
+        state.set(task.id, "run", model=model_name, status="failed", error="prepare not done")
+        return
+    run_dir = Path(run_dir_str)
     if not run_dir.is_dir():
         print(f"[{task.id}/{model_name}] ERROR: run dir not found: {run_dir}")
         state.set(task.id, "run", model=model_name, status="failed", error="run dir not found")
@@ -297,7 +313,7 @@ async def run_task_model(
     _sanitize_run_dir(run_dir)
 
     model_config = config.qwen if model_name == "qwen" else config.claude
-    prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
+    prompt = task.prompt
     followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
 
     await run_single(
@@ -352,7 +368,7 @@ async def run_all(
 
                 will_run += 1
                 model_config = config.qwen if model_name == "qwen" else config.claude
-                prompt = task.prompt_qwen if model_name == "qwen" else task.prompt_claude
+                prompt = task.prompt
                 followups = task.followups_qwen if model_name == "qwen" else task.followups_claude
                 run_dir = config.runs_root / f"{task.id}-{model_name}" / task.project_subdir
 

@@ -13,18 +13,17 @@
 
 ## 提示词规则（极其重要）
 
-prompt_qwen、prompt_claude、followups_qwen、followups_claude 必须满足：
+prompt、followups_qwen、followups_claude 必须满足：
 
 1. 全部用中文（简体中文）
 2. 像真人开发者在 AI 编码助手中打字一样 — 简短、口语化、自然
-3. 初始 prompt（prompt_qwen / prompt_claude）只写一句话描述目标，如："帮我给这个项目加一个命令行状态查看功能"、"这个项目有个并发 bug，帮我修一下"
+3. 初始 prompt 只写一句话描述目标，如："帮我给这个项目加一个命令行状态查看功能"、"这个项目有个并发 bug，帮我修一下"
 4. followups 是渐进式追问 — 每条只问一个具体的下一步，像自然对话："现在加上颜色显示"、"再写几个测试"、"处理一下边界情况"。每条 1-2 句话
-5. prompt_qwen 和 prompt_claude 描述同一个任务但措辞略有不同。followups_qwen 和 followups_claude 数量必须相同（3-4 条）
+5. prompt 字段由两个模型共用（qwen 和 claude 收到完全相同的首轮消息）。followups_qwen 和 followups_claude 数量必须相同（3-4 条）
 6. 不要以"你正在一个本地项目目录中工作"等模板化前缀开头，直接说需求
 7. 渐进流程：初始 prompt = 大目标 → followup 1 = 核心实现 → followup 2 = 增强/边界 → followup 3+ = 测试、完善、文档
-8. prompt_qwen 和 prompt_claude 必须传达相同的信息量和难度。不要给某个模型额外的提示、文件路径或技术细节。两个模型应凭自身能力成功或失败，而非信息不对称
-9. 两个模型的 followups 必须按相同顺序覆盖相同功能领域。措辞可以不同但实质要求必须等价
-10. 不要在 prompt 中引用项目中实际不存在的文件、函数或技术细节
+8. 两个模型的 followups 必须按相同顺序覆盖相同功能领域。措辞可以不同但实质要求必须等价
+9. 不要在 prompt 中引用项目中实际不存在的文件、函数或技术细节
 
 ## 输出要求
 
@@ -42,12 +41,11 @@ clone_method = "git"
 task_type = "对应的task_type"
 domain = "对应的domain"
 language = "对应的language"
-prompt_qwen = """中文一句话"""
+prompt = """中文一句话"""
 followups_qwen = [
   "追问1",
   "追问2",
 ]
-prompt_claude = """中文一句话"""
 followups_claude = [
   "追问1",
   "追问2",

@@ -111,7 +111,7 @@ def build_task_context(task, config) -> dict[str, str]:
             "task_type": task.task_type,
             "domain": task.domain,
             "language": task.language,
-            "prompts": task.prompt_qwen,
+            "prompts": task.prompt,
         }
 
     # --- 1. Defensive fill: ensure prompts / followups are present --------
@@ -119,7 +119,7 @@ def build_task_context(task, config) -> dict[str, str]:
     # (e.g. a format variant), fall back to the TaskConfig so downstream
     # fallbacks and the scoring prompt never see empty fields.
     if not task_ctx.get("prompts"):
-        task_ctx["prompts"] = getattr(task, "prompt_qwen", "")
+        task_ctx["prompts"] = getattr(task, "prompt", "")
     if not task_ctx.get("followups"):
         followups_list = getattr(task, "followups_qwen", None)
         if followups_list:
@@ -196,6 +196,20 @@ def build_task_context(task, config) -> dict[str, str]:
 # Round 1: Dimension selection + description customization
 # ---------------------------------------------------------------------------
 
+def _head_tail_summary(text: str, budget: int) -> str:
+    """Return a head+tail excerpt of *text* within *budget* chars.
+
+    If text fits in budget, return as-is.  Otherwise take 60% from the
+    head and 40% from the tail so dimension selection sees both the
+    initial exploration and the final delivery/verification phases.
+    """
+    if len(text) <= budget:
+        return text
+    head = int(budget * 0.6)
+    tail = budget - head
+    return text[:head] + "\n\n[... 轨迹中段省略 ...]\n\n" + text[-tail:]
+
+
 def build_dimension_prompt(
     task_ctx: dict[str, str],
     qwen_summary: str,
@@ -220,6 +234,9 @@ def build_dimension_prompt(
 {project_summary}
 """
 
+    qwen_excerpt = _head_tail_summary(qwen_summary, TRAJECTORY_SUMMARY_CHARS)
+    claude_excerpt = _head_tail_summary(claude_summary, TRAJECTORY_SUMMARY_CHARS)
+
     return f"""你是评分维度设计师。根据以下项目信息和两条轨迹摘要，从 20 个参考维度中选择 7-10 个最能反映本次任务质量差异的维度，并为每个维度写定制化的 description。
 
 ## 项目信息
@@ -231,13 +248,13 @@ def build_dimension_prompt(
 - 任务描述：{prompts}
 - 追问要点：{followups}
 {project_summary_section}
-## Qwen 轨迹摘要（前 {TRAJECTORY_SUMMARY_CHARS} 字符）
+## Qwen 轨迹摘要（首尾 {TRAJECTORY_SUMMARY_CHARS} 字符）
 
-{qwen_summary[:TRAJECTORY_SUMMARY_CHARS]}
+{qwen_excerpt}
 
-## Claude 轨迹摘要（前 {TRAJECTORY_SUMMARY_CHARS} 字符）
+## Claude 轨迹摘要（首尾 {TRAJECTORY_SUMMARY_CHARS} 字符）
 
-{claude_summary[:TRAJECTORY_SUMMARY_CHARS]}
+{claude_excerpt}
 
 ## 20 个参考维度
 
@@ -501,6 +518,8 @@ def _build_rescore_prompt(
 3. rationale 中是否存在与 score 方向矛盾的描述？（如负面描述+高分）
 4. 是否有两条以上 rationale 使用了相似句式或模板？如有，必须重写使其独立
 5. description 中定义的各档位标准是否与实际给分对应？
+6. 是否存在模式化打分？（如所有维度都给了相同分数）每个维度必须独立评价，分数应反映该维度的具体证据差异，禁止全 3 分或全 4 分等"一刀切"打法
+7. 如果某个维度上模型表现确实突出或确实糟糕，应给出相应的高分或低分，不要因整体 passrate 目标而把所有维度拉向同一个分数
 如发现矛盾，修正分数使其与证据一致，而非修改理由来匹配分数。
 
 ## Bad Pattern 识别

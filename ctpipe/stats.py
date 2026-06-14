@@ -11,7 +11,13 @@ import statistics
 from pathlib import Path
 from typing import Any, Callable
 
-from ctpipe.config import BatchConfig, select_delivery_tasks
+from ctpipe.config import (
+    THRESHOLD_CLAUDE_MIN,
+    THRESHOLD_QWEN_MAX,
+    THRESHOLD_RELATIVE_GAIN_MIN,
+    BatchConfig,
+    select_delivery_tasks,
+)
 from ctpipe.state import PipelineState
 
 # Stages that do NOT have per-model entries.
@@ -34,6 +40,14 @@ _FILTER_FIELD_WHITELIST = frozenset({
     "bad_pattern",
     "qwen_passrate",
     "claude_passrate",
+    "relative_gain",
+    "threshold_ok",
+    "finalize_status",
+    # 交付红线指标（逐条对应 check_passrate_thresholds 的 4 项检查）
+    "qwen_over_threshold",
+    "claude_under_threshold",
+    "claude_not_better",
+    "gain_below_threshold",
 })
 
 
@@ -96,9 +110,9 @@ def _collect_passrate_stats(
     task_ids: list[str],
     models: list[str],
 ) -> dict[str, dict[str, float]]:
-    """Gather passrate values from finalize state and compute min/max/mean.
+    """Gather passrate values from finalize state and compute distribution stats.
 
-    Returns {model: {min, max, mean, count}} for models that have data.
+    Returns {model: {min, max, mean, median, std, count}} for models that have data.
     """
     per_model: dict[str, list[float]] = {m: [] for m in models}
     for tid in task_ids:
@@ -112,11 +126,14 @@ def _collect_passrate_stats(
     result: dict[str, dict[str, float]] = {}
     for model, values in per_model.items():
         if values:
+            n = len(values)
             result[model] = {
                 "min": min(values),
                 "max": max(values),
                 "mean": statistics.mean(values),
-                "count": len(values),
+                "median": statistics.median(values),
+                "std": statistics.stdev(values) if n >= 2 else 0.0,
+                "count": n,
             }
     return result
 
@@ -130,8 +147,16 @@ def _collect_passrate_diff(
     """Compute per-task passrate difference (model_b - model_a) and return stats.
 
     Only includes tasks where both models have a passrate.
-    Returns {mean, median, std, count, positive, negative} or None when
+    Returns {mean, median, std, count, positive, negative, tie} or None when
     fewer than two tasks have paired data.
+
+    The three count buckets partition the paired tasks exactly:
+      - ``positive``: model_b strictly better (diff > 0)
+      - ``negative``: model_b strictly worse  (diff < 0)
+      - ``tie``:      equal passrate          (diff == 0)
+    so ``positive + negative + tie == count`` always holds. Ties get their
+    own bucket rather than folding into ``negative``; the delivery red-line
+    ``claude_not_better`` corresponds to ``negative + tie``.
     """
     diffs: list[float] = []
     for tid in task_ids:
@@ -142,7 +167,10 @@ def _collect_passrate_diff(
             isinstance(a_val, (int, float))
             and isinstance(b_val, (int, float))
         ):
-            diffs.append(float(b_val) - float(a_val))
+            # Round to 4 decimals (the storage precision) so that
+            # passrates equal at the displayed level produce diff == 0
+            # instead of a floating-point artefact like 5.55e-17.
+            diffs.append(round(float(b_val), 4) - round(float(a_val), 4))
 
     if len(diffs) < 2:
         if len(diffs) == 1:
@@ -154,11 +182,13 @@ def _collect_passrate_diff(
                 "count": 1,
                 "positive": int(d > 0),
                 "negative": int(d < 0),
+                "tie": int(d == 0),
             }
         return None
 
     positive = sum(1 for d in diffs if d > 0)
     negative = sum(1 for d in diffs if d < 0)
+    tie = sum(1 for d in diffs if d == 0)
     return {
         "mean": statistics.mean(diffs),
         "median": statistics.median(diffs),
@@ -166,6 +196,7 @@ def _collect_passrate_diff(
         "count": len(diffs),
         "positive": positive,
         "negative": negative,
+        "tie": tie,
     }
 
 
@@ -281,14 +312,16 @@ def _print_table(
 
     # Passrate summary per model
     if passrate_stats:
-        print(f"\n{'Model':<10} {'Min':>8} {'Max':>8} {'Mean':>8} {'Count':>6}")
-        print("-" * 42)
+        print(f"\n{'Model':<10} {'Min':>8} {'Max':>8} {'Mean':>8} {'Med':>8} {'Std':>8} {'Count':>6}")
+        print("-" * 62)
         for model, s in passrate_stats.items():
             print(
                 f"{model:<10} "
                 f"{s['min']:>8.4f} "
                 f"{s['max']:>8.4f} "
                 f"{s['mean']:>8.4f} "
+                f"{s['median']:>8.4f} "
+                f"{s['std']:>8.4f} "
                 f"{int(s['count']):>6}"
             )
 
@@ -301,7 +334,8 @@ def _print_table(
         print(f"  Median  {passrate_diff['median']:>+.4f}")
         print(f"  Std     {passrate_diff['std']:> .4f}")
         print(f"  {model_b}>{model_a}: {int(passrate_diff['positive'])}   "
-              f"{model_b}<={model_a}: {int(passrate_diff['negative'])}")
+              f"{model_b}={model_a}: {int(passrate_diff['tie'])}   "
+              f"{model_b}<{model_a}: {int(passrate_diff['negative'])}")
 
     # Duration summary per stage/model
     if timing_stats is not None:
@@ -406,6 +440,8 @@ def _print_json(
                 "min": round(s["min"], 4),
                 "max": round(s["max"], 4),
                 "mean": round(s["mean"], 4),
+                "median": round(s["median"], 4),
+                "std": round(s["std"], 4),
                 "count": int(s["count"]),
             }
             for model, s in passrate_stats.items()
@@ -426,6 +462,7 @@ def _print_json(
             "count": int(passrate_diff["count"]),
             "positive": int(passrate_diff["positive"]),
             "negative": int(passrate_diff["negative"]),
+            "tie": int(passrate_diff["tie"]),
         }
 
     payload: dict[str, object] = {"summary": summary, "per_task": per_task}
@@ -625,7 +662,10 @@ def _make_comparison(field: str, op: str, value: Any) -> Callable[[dict[str, Any
     """Build a single-field comparison predicate."""
     def predicate(record: dict[str, Any]) -> bool:
         record_value = record.get(field)
-        if record_value is None:
+        # None / empty-string → "no data": never match any comparison.
+        # Covers relative_gain=None (qwen=0 / missing passrate),
+        # finalize_status="" (task not yet finalized), etc.
+        if record_value is None or record_value == "":
             return False
 
         compare_value = value
@@ -692,6 +732,56 @@ def _build_task_records(
                 record[f"{model}_passrate"] = None
         record["finalize_status"] = fin.get("status", "")
         record["threshold_ok"] = bool(fin.get("threshold_ok", False))
+        # Derived metric: relative_gain = (claude - qwen) / qwen
+        # Mirrors the logic in config.check_passrate_thresholds:
+        #   - both passrates present and qwen > 0  → compute
+        #   - qwen == 0                           → None (data incomplete)
+        #   - either passrate missing             → None
+        qwen_pr = record.get("qwen_passrate")
+        claude_pr = record.get("claude_passrate")
+        if (
+            isinstance(qwen_pr, (int, float))
+            and isinstance(claude_pr, (int, float))
+        ):
+            if qwen_pr > 0:
+                record["relative_gain"] = round(
+                    (float(claude_pr) - float(qwen_pr)) / float(qwen_pr), 4,
+                )
+            else:
+                # qwen == 0: consistent with red-line validation — leave empty.
+                record["relative_gain"] = None
+        else:
+            record["relative_gain"] = None
+
+        # 交付红线指标 — 逐条对应 config.check_passrate_thresholds 的 4 项检查
+        has_qwen = isinstance(qwen_pr, (int, float))
+        has_claude = isinstance(claude_pr, (int, float))
+        record["qwen_over_threshold"] = (
+            has_qwen and float(qwen_pr) >= THRESHOLD_QWEN_MAX
+        )
+        record["claude_under_threshold"] = (
+            has_claude and float(claude_pr) <= THRESHOLD_CLAUDE_MIN
+        )
+        record["claude_not_better"] = (
+            has_qwen and has_claude and float(claude_pr) <= float(qwen_pr)
+        )
+        # gain_below_threshold: 当 qwen > 0 时检查 relative_gain；
+        # 当 qwen == 0 时检查 claude_passrate 是否低于增益阈值
+        # （与 check_passrate_thresholds 的 qwen==0 分支保持一致）
+        if has_qwen and has_claude:
+            if float(qwen_pr) > 0:
+                rg = record.get("relative_gain")
+                record["gain_below_threshold"] = (
+                    isinstance(rg, (int, float))
+                    and float(rg) <= THRESHOLD_RELATIVE_GAIN_MIN
+                )
+            else:
+                record["gain_below_threshold"] = (
+                    float(claude_pr) < THRESHOLD_RELATIVE_GAIN_MIN
+                )
+        else:
+            record["gain_below_threshold"] = False
+
         records.append(record)
     return records
 
@@ -750,11 +840,14 @@ def _group_by_fields(
                     if r.get(f"{model}_passrate") is not None
                 ]
                 if values:
+                    n = len(values)
                     entry["passrate_stats"][model] = {
                         "min": min(values),
                         "max": max(values),
                         "mean": statistics.mean(values),
-                        "count": len(values),
+                        "median": statistics.median(values),
+                        "std": statistics.stdev(values) if n >= 2 else 0.0,
+                        "count": n,
                     }
             groups.append(entry)
         groupings.append({
@@ -769,7 +862,9 @@ def _format_pr(stats: dict[str, Any] | None) -> str:
     """Format a passrate stats dict as a one-line summary."""
     if not stats:
         return "N/A"
-    return f"min={stats['min']:.4f}  max={stats['max']:.4f}  mean={stats['mean']:.4f}  n={stats['count']}"
+    return (f"min={stats['min']:.4f}  max={stats['max']:.4f}  "
+            f"mean={stats['mean']:.4f}  med={stats['median']:.4f}  "
+            f"std={stats['std']:.4f}  n={stats['count']}")
 
 
 def show_stats(
@@ -856,6 +951,8 @@ def show_stats(
                                     "min": round(s["min"], 4),
                                     "max": round(s["max"], 4),
                                     "mean": round(s["mean"], 4),
+                                    "median": round(s["median"], 4),
+                                    "std": round(s["std"], 4),
                                     "count": s["count"],
                                 }
                                 for m, s in grp["passrate_stats"].items()
@@ -887,9 +984,9 @@ def show_stats(
                 else:
                     print(f"  PASSRATE BY {g['field'].upper()}")
                 print(f"{'=' * 70}")
-                col_hdr = f"  {'Group':<20} {'Model':<10} {'Min':>8} {'Max':>8} {'Mean':>8} {'Count':>6}"
+                col_hdr = f"  {'Group':<20} {'Model':<10} {'Min':>8} {'Max':>8} {'Mean':>8} {'Med':>8} {'Std':>8} {'Count':>6}"
                 print(col_hdr)
-                print(f"  {'-' * 62}")
+                print(f"  {'-' * 82}")
                 for grp in g["groups"]:
                     value_str = str(grp["group_value"]) if grp["group_value"] != "" else "(empty)"
                     label = f"{value_str} ({grp['count']})"

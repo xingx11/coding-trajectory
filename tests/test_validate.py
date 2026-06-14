@@ -27,7 +27,7 @@ from ctpipe.config import (
     write_task_manifest,
 )
 from ctpipe.finalize import finalize
-from ctpipe.toml_utils import Criterion, write_quality_toml
+from ctpipe.toml_utils import Criterion, read_quality_toml, write_quality_toml
 from conftest import build_config, make_task, write_trajectory, write_score
 from ctpipe.validate import validate
 
@@ -60,6 +60,17 @@ def _setup_delivery_for_validate(
                 delivery_dir / "scores" / model_name / f"{model_stem(task.id, model_name)}.quality.toml",
                 score,
             )
+
+        # Share one criterion score between models so the A3-f check passes
+        shared_score = 3
+        for model_name in ("qwen", "claude"):
+            sp = delivery_dir / "scores" / model_name / f"{model_stem(task.id, model_name)}.quality.toml"
+            criteria = read_quality_toml(sp)
+            criteria[-1] = Criterion(
+                criteria[-1].name, criteria[-1].description, criteria[-1].type,
+                criteria[-1].points, criteria[-1].weight, shared_score, criteria[-1].rationale,
+            )
+            write_quality_toml(sp, criteria)
 
         meta_dir = delivery_dir / "metadata"
         meta_dir.mkdir(parents=True, exist_ok=True)

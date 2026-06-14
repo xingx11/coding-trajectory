@@ -15,7 +15,7 @@ from ctpipe.config import (
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
-from ctpipe.toml_utils import calc_passrate, is_complete_rubric, is_unscored_template, read_quality_toml
+from ctpipe.toml_utils import safe_calc_passrate
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory, trajectory_filename
 
 
@@ -79,14 +79,9 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 run_info = state.get(task.id, "run", model_name)
                 session_id = collect_info.get("session_id", run_info.get("session_id", ""))
                 turns = run_info.get("turns", "?")
-                pr = None
-                if score_path.exists():
-                    try:
-                        criteria = read_quality_toml(score_path)
-                        if criteria and not is_unscored_template(criteria) and is_complete_rubric(criteria):
-                            pr = round(calc_passrate(criteria), 4)
-                    except Exception:
-                        pass
+                pr, _ = safe_calc_passrate(score_path)
+                if pr is not None:
+                    pr = round(pr, 4)
                 jsonl_rel = collect_info.get("jsonl_path", f"trajectories/{model_name}/{trajectory_filename(task.id, model_name)}")
                 models_info[model_name] = {
                     "passrate": pr, "turns": turns,
@@ -177,23 +172,11 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                             )
 
                 passrate = ""
-                if score_path.exists():
-                    try:
-                        criteria = read_quality_toml(score_path)
-                        if is_unscored_template(criteria):
-                            issues.append(f"[{task.id}/{model_name}] score file is unscored template")
-                        elif not is_complete_rubric(criteria):
-                            scored_count = sum(1 for c in criteria if c.score >= 1 and c.rationale)
-                            issues.append(
-                                f"[{task.id}/{model_name}] score file incomplete: "
-                                f"{scored_count}/{len(criteria)} criteria scored"
-                            )
-                        else:
-                            passrate = f"{calc_passrate(criteria):.4f}"
-                    except Exception as exc:
-                        issues.append(f"[{task.id}/{model_name}] score read error: {exc}")
+                pr, score_err = safe_calc_passrate(score_path)
+                if pr is not None:
+                    passrate = f"{pr:.4f}"
                 else:
-                    issues.append(f"[{task.id}/{model_name}] missing score file")
+                    issues.append(f"[{task.id}/{model_name}] {score_err}")
 
                 prefix = model_name
                 row[f"{prefix}_trajectory"] = rel_jsonl_path
@@ -249,8 +232,8 @@ def finalize(config: BatchConfig, task_ids: list[str] | None = None, models: lis
                 task.id,
                 "finalize",
                 status=finalize_status,
-                qwen_passrate=qwen_pr,
-                claude_passrate=claude_pr,
+                qwen_passrate=qwen_pr if has_qwen else None,
+                claude_passrate=claude_pr if has_claude else None,
                 threshold_ok=threshold_ok,
             )
             rows.append(row)

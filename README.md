@@ -387,8 +387,7 @@ acceptance_criteria = [
   "竖屏模式不受影响",
 ]
 bad_pattern = "lazy_shortcut"
-prompt_qwen = """..."""
-prompt_claude = """..."""
+prompt = """..."""
 followups_qwen = ["...", "..."]
 followups_claude = ["...", "...", "..."]
 ```

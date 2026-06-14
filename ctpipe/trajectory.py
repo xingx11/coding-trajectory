@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ctpipe.config import model_stem
-from ctpipe.project_hash import project_hash_dir
+from ctpipe.project_hash import CLAUDE_PROJECTS_DIR, project_hash_dir
 
 
 @dataclass
@@ -20,6 +20,7 @@ class TrajectoryInfo:
     last_ts: str | None = None
     line_count: int = 0
     user_turns: int = 0
+    first_user_query: str = ""
 
     @property
     def detected_provider(self) -> str:
@@ -70,6 +71,7 @@ def find_delivery_trajectory(
 
 def parse_trajectory(jsonl_path: Path) -> TrajectoryInfo:
     info = TrajectoryInfo(file_path=jsonl_path)
+    first_query_found = False
     with jsonl_path.open("r", encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             raw = raw.strip()
@@ -94,9 +96,31 @@ def parse_trajectory(jsonl_path: Path) -> TrajectoryInfo:
                 if info.first_user_ts is None and obj.get("type") == "user":
                     info.first_user_ts = ts
             msg = obj.get("message")
-            if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("model"):
-                info.models.add(msg["model"])
+            if isinstance(msg, dict):
+                if msg.get("role") == "assistant" and msg.get("model"):
+                    info.models.add(msg["model"])
+                # Extract first user query text for B1-d consistency check
+                if not first_query_found and msg.get("role") == "user":
+                    content = msg.get("content")
+                    if content:
+                        first_query_found = True
+                        info.first_user_query = _extract_user_text(content)
     return info
+
+
+def _extract_user_text(content: object) -> str:
+    """Extract plain text from a user message content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts)
+    return ""
 
 
 def find_trajectory_for_run(
@@ -111,9 +135,25 @@ def find_trajectory_for_run(
     2. Filter JSONL files with mtime > start_time
     3. If expected_session_id given, match by sessionId inside the file
     4. Otherwise take most recent by mtime
+
+    Fallback: Claude Code may write JSONL to the parent process's project hash
+    directory instead of the cwd-based one.  If the primary lookup fails, scan
+    all sibling project hash dirs for a matching session-id file.
     """
     proj_dir = project_hash_dir(run_dir)
-    if not proj_dir.is_dir():
+
+    # Fallback: if primary proj_dir doesn't exist and we have a session id,
+    # search all project hash dirs for {session_id}.jsonl
+    if not proj_dir.is_dir() and expected_session_id and CLAUDE_PROJECTS_DIR.is_dir():
+        for d in CLAUDE_PROJECTS_DIR.iterdir():
+            if d.is_dir():
+                candidate = d / f"{expected_session_id}.jsonl"
+                if candidate.is_file():
+                    proj_dir = d
+                    break
+        else:
+            return None
+    elif not proj_dir.is_dir():
         return None
 
     # Fast path: JSONL filename is {session_id}.jsonl
@@ -165,8 +205,19 @@ def extract_for_scoring(jsonl_path: Path, max_chars: int = 50_000) -> str:
     Keeps user messages, assistant text, tool call summaries.
     Truncates tool results and skips base64/binary content.
     """
+    # Key tool fields that carry important scoring evidence
+    _KEY_FIELDS: dict[str, set[str]] = {
+        "Edit": {"old_string", "new_string", "file_path"},
+        "Write": {"file_path", "content"},
+        "Bash": {"command"},
+    }
+
     parts: list[str] = []
     total = 0
+    seen_snippet_tool: dict[str, str] = {}   # snippet -> tool name that first produced it
+    seen_error_snippets: set[str] = set()     # dedup set for error results
+    seen_normal_snippets: set[str] = set()     # dedup set for normal results
+    tool_name_by_id: dict[str, str] = {}
 
     with jsonl_path.open("r", encoding="utf-8", errors="replace") as fh:
         for raw in fh:
@@ -189,9 +240,53 @@ def extract_for_scoring(jsonl_path: Path, max_chars: int = 50_000) -> str:
                 continue
 
             if role == "user":
-                text = _extract_text(content)
-                if text:
-                    chunk = f"\n=== USER ===\n{text}\n"
+                text_parts: list[str] = []
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            if block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                            elif block.get("type") == "tool_result":
+                                is_error = block.get("is_error", False)
+                                result_content = block.get("content") or ""
+                                if isinstance(result_content, list):
+                                    result_content = " ".join(
+                                        b.get("text", "") for b in result_content
+                                        if isinstance(b, dict) and b.get("type") == "text"
+                                    )
+                                result_content = str(result_content).strip()
+                                snippet = result_content[:300]
+                                if is_error:
+                                    if snippet and snippet in seen_error_snippets:
+                                        tn = seen_snippet_tool[snippet]
+                                        entry = f"[Result: ERROR same as {tn}]".rstrip()
+                                    else:
+                                        entry = f"[Result: ERROR] {snippet}".rstrip()
+                                        if snippet:
+                                            seen_error_snippets.add(snippet)
+                                            seen_snippet_tool[snippet] = tool_name_by_id.get(
+                                                block.get("tool_use_id", ""), ""
+                                            )
+                                    text_parts.append(entry)
+                                elif result_content:
+                                    if snippet in seen_normal_snippets:
+                                        tn = seen_snippet_tool[snippet]
+                                        text_parts.append(f"[Result: same as {tn}]")
+                                    else:
+                                        seen_normal_snippets.add(snippet)
+                                        seen_snippet_tool[snippet] = tool_name_by_id.get(
+                                            block.get("tool_use_id", ""), ""
+                                        )
+                                        text_parts.append(f"[Result: {snippet}]")
+                                else:
+                                    text_parts.append("[Result: ok]")
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                if text_parts:
+                    combined = "\n".join(text_parts)
+                    chunk = f"\n=== USER ===\n{combined}\n"
                     parts.append(chunk)
                     total += len(chunk)
 
@@ -206,33 +301,25 @@ def extract_for_scoring(jsonl_path: Path, max_chars: int = 50_000) -> str:
                                 text_parts.append(block.get("text", ""))
                             elif block.get("type") == "tool_use":
                                 name = block.get("name", "?")
+                                tool_id = block.get("id", "")
+                                if tool_id:
+                                    tool_name_by_id[tool_id] = name
                                 inp = block.get("input", {})
+                                key_fields = _KEY_FIELDS.get(name, set())
                                 summary_parts = []
                                 for k, v in (inp.items() if isinstance(inp, dict) else []):
                                     sv = str(v)
-                                    if len(sv) > 80:
-                                        sv = sv[:40] + "..."
+                                    if k in key_fields:
+                                        if len(sv) > 300:
+                                            sv = sv[:200] + "..."
+                                    else:
+                                        if len(sv) > 80:
+                                            sv = sv[:40] + "..."
                                     summary_parts.append(f"{k}={sv}")
-                                    if len(summary_parts) >= 3:
+                                    if len(summary_parts) >= (5 if key_fields else 3):
                                         break
                                 inp_summary = ", ".join(summary_parts) or "..."
                                 text_parts.append(f"[Tool: {name}({inp_summary})]")
-                            elif block.get("type") == "tool_result":
-                                is_error = block.get("is_error", False)
-                                result_content = block.get("content", "")
-                                if isinstance(result_content, list):
-                                    result_content = " ".join(
-                                        b.get("text", "") for b in result_content
-                                        if isinstance(b, dict) and b.get("type") == "text"
-                                    )
-                                result_content = str(result_content).strip()
-                                if is_error:
-                                    snippet = result_content[:300] if result_content else ""
-                                    text_parts.append(f"[Result: ERROR] {snippet}".rstrip())
-                                elif result_content:
-                                    text_parts.append(f"[Result: {result_content[:300]}]")
-                                else:
-                                    text_parts.append("[Result: ok]")
                 if text_parts:
                     combined = "\n".join(text_parts)
                     chunk = f"\n=== ASSISTANT ===\n{combined}\n"
@@ -249,16 +336,3 @@ def extract_for_scoring(jsonl_path: Path, max_chars: int = 50_000) -> str:
         result = result[:keep_start] + "\n\n[... truncated ...]\n\n" + result[-keep_end:]
     return result
 
-
-def _extract_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                texts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                texts.append(block)
-        return "\n".join(texts)
-    return ""

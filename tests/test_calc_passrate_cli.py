@@ -114,8 +114,8 @@ class TestUnscoredTemplate(unittest.TestCase):
             code, out, err = _run([str(f)])
             self.assertEqual(code, 0, "default mode should exit 0")
             self.assertEqual(out, "", "unscored file must NOT print to stdout")
-            self.assertIn("UNSCORED", err)
-            self.assertIn("6 criteria", err)
+            self.assertIn("ERROR", err)
+            self.assertIn("unscored template", err)
 
     def test_unscored_strict_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +123,7 @@ class TestUnscoredTemplate(unittest.TestCase):
             _write_unscored(f, count=6)
             code, out, err = _run(["--strict", str(f)])
             self.assertEqual(code, 1)
-            self.assertIn("UNSCORED", err)
+            self.assertIn("ERROR", err)
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +138,8 @@ class TestIncompleteRubric(unittest.TestCase):
             code, out, err = _run([str(f)])
             self.assertEqual(code, 0, "default mode should exit 0")
             self.assertEqual(out, "")
-            self.assertIn("INCOMPLETE", err)
-            self.assertIn("2/6", err)
+            self.assertIn("ERROR", err)
+            self.assertIn("wrong criteria count", err)
 
     def test_incomplete_strict_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -147,7 +147,7 @@ class TestIncompleteRubric(unittest.TestCase):
             _write_incomplete(f, scored_count=2, total=6)
             code, out, err = _run(["--strict", str(f)])
             self.assertEqual(code, 1)
-            self.assertIn("INCOMPLETE", err)
+            self.assertIn("ERROR", err)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ class TestDirectoryScanning(unittest.TestCase):
             self.assertIn("b.quality.toml", out)
 
     def test_mixed_directory_default_continues(self):
-        """Default mode: unscored files warned, scored files printed, exit 0."""
+        """Default mode: invalid files warned, scored files printed, exit 0."""
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             _write_scored(d / "scored.quality.toml", score=4)
@@ -180,9 +180,8 @@ class TestDirectoryScanning(unittest.TestCase):
             # scored file → numeric output on stdout
             self.assertIn("scored.quality.toml", out)
             self.assertIn("0.8000", out)
-            # unscored + incomplete → warnings on stderr
-            self.assertIn("UNSCORED", err)
-            self.assertIn("INCOMPLETE", err)
+            # unscored + incomplete → specific errors on stderr
+            self.assertIn("ERROR", err)
 
     def test_mixed_directory_strict_exits_nonzero(self):
         """--strict: any issue makes exit 1, but all files still processed."""
@@ -195,7 +194,7 @@ class TestDirectoryScanning(unittest.TestCase):
             self.assertEqual(code, 1)
             # scored file still gets its output
             self.assertIn("scored.quality.toml", out)
-            self.assertIn("UNSCORED", err)
+            self.assertIn("unscored template", err)
 
 
 # ---------------------------------------------------------------------------
@@ -203,17 +202,17 @@ class TestDirectoryScanning(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestErrorPaths(unittest.TestCase):
 
-    def test_nonexistent_file_exits_nonzero(self):
+    def test_nonexistent_file_warns_default_mode(self):
         code, out, err = _run(["/no/such/file.toml"])
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0, "non-strict mode exits 0 for any failure")
         self.assertIn("ERROR", err)
 
-    def test_empty_toml_exits_nonzero(self):
+    def test_empty_toml_warns_default_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "empty.toml"
             f.write_text("", encoding="utf-8")
             code, out, err = _run([str(f)])
-            self.assertEqual(code, 1)
+            self.assertEqual(code, 0, "non-strict mode exits 0 for any failure")
             self.assertIn("ERROR", err)
 
 

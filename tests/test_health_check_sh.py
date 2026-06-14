@@ -6,6 +6,10 @@ JSON report, and exits 0/1/2 for healthy/degraded/critical (3 on anything else).
 We isolate the parse-and-map logic from real ctpipe by injecting CTPIPE_CMD=true:
 `true` ignores its arguments and returns 0 without writing the report, so the
 report we pre-write on disk is exactly what the script ends up parsing.
+
+Also covers argument-validation edge cases: options that require a value
+(--config, --env, --delivery-date, --output) given at the end of argv with
+nothing after them must exit 3 with a clear error, not crash under set -u.
 """
 
 from __future__ import annotations
@@ -60,3 +64,28 @@ def test_exit_code_3_on_missing_field(tmp_path: Path) -> None:
     report.write_text('{"other": "x"}\n', encoding="utf-8")
     proc = _run(report)
     assert proc.returncode == 3, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+
+
+@pytest.mark.parametrize("option", [
+    "--config", "--env", "--delivery-date", "--output", "--tasks", "--models",
+])
+def test_exit_code_3_on_missing_option_value(option: str) -> None:
+    """An option that expects a value, given at the end of argv with nothing after it,
+    must print a clear error naming the option and exit 3 — not crash with a bash
+    'unbound variable' traceback."""
+    proc = subprocess.run(
+        [BASH, "scripts/health_check.sh", option],
+        cwd=REPO,
+        env={**os.environ, "CTPIPE_CMD": "true"},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert proc.returncode == 3, (
+        f"option={option!r}: expected exit 3, got {proc.returncode}\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+    assert option in proc.stderr, (
+        f"option={option!r}: stderr should mention the offending option\n"
+        f"stderr={proc.stderr!r}"
+    )

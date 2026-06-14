@@ -470,8 +470,7 @@ class TestBuildTaskContext(unittest.TestCase):
             task_type="feature",
             domain="web_dev",
             language="python",
-            prompt_qwen="来自 TaskConfig 的默认 prompt",
-            prompt_claude="",
+            prompt="来自 TaskConfig 的默认 prompt",
             followups_qwen=["来自 TaskConfig 的追问"],
             followups_claude=[],
             task_title="",
@@ -602,7 +601,7 @@ class TestBuildTaskContext(unittest.TestCase):
         """When TaskConfig fields are empty, safety net fills defaults and warns."""
         task = self._task(
             task_type="", domain="", language="",
-            prompt_qwen="", followups_qwen=[],
+            prompt="", followups_qwen=[],
         )
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -633,7 +632,7 @@ class TestBuildTaskContext(unittest.TestCase):
 
     def test_safety_net_partial_warnings(self):
         """Safety net warns only about the specific missing fields."""
-        task = self._task(task_type="", prompt_qwen="")
+        task = self._task(task_type="", prompt="")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             ctx = build_task_context(task, self.config)

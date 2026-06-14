@@ -152,3 +152,105 @@ def has_score_tiers(description: str) -> bool:
         if len(content) < 5:
             return False
     return True
+
+
+def safe_calc_passrate(score_path: Path) -> tuple[float | None, str]:
+    """Read a score file and compute passrate; return (passrate, error_reason).
+
+    Returns (float, "") on success.
+    Returns (None, reason) when the file is missing, unreadable, empty,
+    unscored (all criteria have score=0 and empty rationale), or incomplete
+    (not all criteria are fully scored).
+    """
+    if not score_path.exists():
+        return None, "score file missing"
+    try:
+        criteria = read_quality_toml(score_path)
+    except Exception as exc:
+        return None, f"score file unreadable: {exc}"
+    if not criteria:
+        return None, "score file has no criteria"
+    if is_unscored_template(criteria):
+        return None, "score file is still an unscored template"
+    if not is_complete_rubric(criteria):
+        from ctpipe.config import MAX_CRITERIA_COUNT, MIN_CRITERIA_COUNT
+        n = len(criteria)
+        if not (MIN_CRITERIA_COUNT <= n <= MAX_CRITERIA_COUNT):
+            return None, f"wrong criteria count: {n} (expected {MIN_CRITERIA_COUNT}-{MAX_CRITERIA_COUNT})"
+        bad_scores = [c for c in criteria if not (1 <= c.score <= 5)]
+        if bad_scores:
+            return None, f"score {bad_scores[0].score} out of range 1-5 in '{bad_scores[0].name}'"
+        missing_rationale = [c for c in criteria if not c.rationale]
+        if missing_rationale:
+            return None, f"missing rationale in '{missing_rationale[0].name}'"
+        scored = sum(1 for c in criteria if 1 <= c.score <= 5 and c.rationale)
+        return None, f"incomplete scoring: {scored}/{n} criteria scored"
+    try:
+        return calc_passrate(criteria), ""
+    except Exception as exc:
+        return None, f"passrate calculation error: {exc}"
+
+
+def read_complete_score(score_path: Path) -> tuple[list[Criterion] | None, float | None, str]:
+    """Read and validate a score file, returning validated criteria and passrate.
+
+    Consolidates the repeated pattern found across score.py and health.py of:
+      1. Read the TOML score file
+      2. Skip if invalid, unscored, or incomplete
+      3. Calculate the passrate
+
+    Validation chain (each step short-circuits on failure):
+      - File must exist and be parseable as TOML
+      - Must contain at least one criterion
+      - Must not be an unscored template (all score=0 with empty rationale)
+      - Must pass ``is_complete_rubric()``: criterion count within
+        MIN–MAX range, every score in 1–5, points=5, type="likert",
+        and non-empty rationale
+      - Every criterion name must be valid snake_case
+        (``is_valid_criterion_name()``)
+
+    Args:
+        score_path: Path to the ``.quality.toml`` score file.
+
+    Returns:
+        ``(criteria, passrate, "")`` on success — *criteria* is the fully
+        validated list of :class:`Criterion` objects and *passrate* is the
+        weighted pass rate (0.0–1.0).
+
+        ``(None, None, reason)`` on any validation failure — *reason* is a
+        human-readable string such as ``"score file missing"``,
+        ``"score 0 out of range 1-5 in 'delivery'"``, or
+        ``"incomplete scoring: 5/7 criteria scored"``.
+    """
+    from ctpipe.config import is_valid_criterion_name
+
+    if not score_path.exists():
+        return None, None, "score file missing"
+    try:
+        criteria = read_quality_toml(score_path)
+    except Exception as exc:
+        return None, None, f"score file unreadable: {exc}"
+    if not criteria:
+        return None, None, "score file has no criteria"
+    if is_unscored_template(criteria):
+        return None, None, "score file is still an unscored template"
+    if not is_complete_rubric(criteria):
+        from ctpipe.config import MAX_CRITERIA_COUNT, MIN_CRITERIA_COUNT
+        n = len(criteria)
+        if not (MIN_CRITERIA_COUNT <= n <= MAX_CRITERIA_COUNT):
+            return None, None, f"wrong criteria count: {n} (expected {MIN_CRITERIA_COUNT}-{MAX_CRITERIA_COUNT})"
+        bad_scores = [c for c in criteria if not (1 <= c.score <= 5)]
+        if bad_scores:
+            return None, None, f"score {bad_scores[0].score} out of range 1-5 in '{bad_scores[0].name}'"
+        missing_rationale = [c for c in criteria if not c.rationale]
+        if missing_rationale:
+            return None, None, f"missing rationale in '{missing_rationale[0].name}'"
+        scored = sum(1 for c in criteria if 1 <= c.score <= 5 and c.rationale)
+        return None, None, f"incomplete scoring: {scored}/{n} criteria scored"
+    if not all(is_valid_criterion_name(c.name) for c in criteria):
+        return None, None, "invalid criterion name"
+    try:
+        passrate = calc_passrate(criteria)
+    except Exception as exc:
+        return None, None, f"passrate calculation error: {exc}"
+    return criteria, passrate, ""

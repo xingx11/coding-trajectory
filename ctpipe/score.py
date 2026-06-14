@@ -22,7 +22,7 @@ from ctpipe.config import (
     select_delivery_tasks,
 )
 from ctpipe.state import PipelineState
-from ctpipe.toml_utils import Criterion, calc_passrate, has_custom_descriptions, has_score_tiers, read_quality_toml, write_quality_toml, write_rubric_pair
+from ctpipe.toml_utils import Criterion, calc_passrate, has_custom_descriptions, has_score_tiers, read_complete_score, read_quality_toml, write_quality_toml, write_rubric_pair
 from ctpipe.trajectory import extract_for_scoring
 
 
@@ -60,7 +60,7 @@ def _build_scoring_prompt(
 
     Args:
         fixed_criteria: If provided, AI must score exactly these dimensions.
-            If None, AI selects 6-10 from the 20 reference dimensions.
+            If None, AI selects 7-10 from the 20 reference dimensions.
         custom_criteria: If provided, use these customized descriptions
             (project-specific, with score tiers). Takes precedence over
             fixed_criteria for description text.
@@ -82,6 +82,10 @@ def _build_scoring_prompt(
             f"注意：这些 description 已根据当前项目和任务特征量身定制，"
             f"你必须在输出的 TOML 中完整保留这些定制化 description，不得替换为通用模板。"
         )
+        desc_weight_rule = (
+            "- weight 必须使用评分模板中指定的权重值，不得修改\n"
+            "- description 必须原样复制上面提供的定制化描述，不得替换为通用模板，保持一行字符串"
+        )
     elif fixed_criteria:
         # Fixed mode: score exactly these dimensions
         dim_table = build_reference_dimension_table(fixed_criteria)
@@ -90,8 +94,12 @@ def _build_scoring_prompt(
             f"你必须使用以下 {dim_count} 个评分维度，不得增加或减少：\n\n"
             f"{dim_table}"
         )
+        desc_weight_rule = (
+            "- weight 规则：与架构边界、安全合规相关的维度设为 2.0，其余设为 1.0\n"
+            "- description 必须使用上面提供的中文完整描述，保持一行字符串"
+        )
     else:
-        # Free-selection mode: pick 6-10 from 20 reference dimensions
+        # Free-selection mode: pick 7-10 from 20 reference dimensions
         dim_table = build_reference_dimension_table()
         selection_instruction = (
             f"从以下 20 个参考维度中选择 7-{MAX_CRITERIA_COUNT} 个"
@@ -100,11 +108,17 @@ def _build_scoring_prompt(
             f"选择规则：\n"
             f"- 基于 JSONL 轨迹中真实出现的任务特征和行为证据选择\n"
             f"- 如果某个维度没有可观察证据，不要选择它\n"
-            f"- 优先选择与核心目标、失败点、验收标准和最终可用性最相关的维度\n\n"
+            f"- 优先选择与核心目标、失败点、验收标准和最终可用性最相关的维度\n"
+            f"- 每个选中维度必须保持原子性：一个维度只评一件事，不能同时要求 A 和 B\n"
+            f"- 所选维度之间不能有实质性重叠，如果两个维度评价同一类能力的不同说法，只保留更精确的一个\n\n"
             f"description 定制化要求：\n"
             f"- 输出的 description 必须融入本次任务的项目名称、技术栈、具体操作等信息\n"
             f"- 不要照搬上面的通用参考描述，要根据轨迹中的实际内容进行定制化改写\n"
             f"- 保留 1-5 分档位结构，但各档位描述要具体到本项目的场景"
+        )
+        desc_weight_rule = (
+            "- weight 规则：与架构边界、安全合规相关的维度设为 2.0，其余设为 1.0\n"
+            "- description 必须按照上面的定制化要求编写，融入项目特征和具体操作，保持一行字符串"
         )
 
     # Build task context block if available
@@ -134,8 +148,7 @@ def _build_scoring_prompt(
 - 3分：主路径完成但有明显遗漏
 - 4分：大部分完成，仅有轻微问题
 - 5分：完整、高质量、有充分验证
-- weight 必须使用评分模板中指定的权重值（与架构边界/安全合规相关的维度为 2.0，其余为 1.0）
-- description 必须使用上面提供的中文完整描述，保持一行字符串
+{desc_weight_rule}
 
 ## 高分校准与封顶规则（必须遵守）
 
@@ -204,6 +217,8 @@ def _build_scoring_prompt(
 3. rationale 中是否存在与 score 方向矛盾的描述？（如负面描述+高分）
 4. 是否有两条以上 rationale 使用了相似句式或模板？如有，必须重写使其独立
 5. description 中定义的各档位标准是否与实际给分对应？
+6. 是否存在模式化打分？（如所有维度都给了相同分数）每个维度必须独立评价，分数应反映该维度的具体证据差异，禁止全 3 分或全 4 分等"一刀切"打法
+7. 如果某个维度上模型表现确实突出或确实糟糕，应给出相应的高分或低分，不要因整体 passrate 目标而把所有维度拉向同一个分数
 如发现矛盾，修正分数使其与证据一致，而非修改理由来匹配分数。
 
 ## Bad Pattern 识别
@@ -595,21 +610,12 @@ def _read_existing_criteria_names(score_path) -> list[str] | None:
 
     Returns None if the file is invalid, incomplete, or uses malformed names.
     """
-    try:
-        criteria = read_quality_toml(score_path)
-        if not criteria:
-            return None
-        if not (MIN_CRITERIA_COUNT <= len(criteria) <= MAX_CRITERIA_COUNT):
-            return None
-        if not all(c.score >= 1 and c.rationale for c in criteria):
-            return None
-        names = [c.name for c in criteria]
-        if not all(is_valid_criterion_name(n) for n in names):
-            return None
-        return names
-    except Exception as exc:
-        print(f"  WARNING: could not read existing criteria from {score_path.name}: {exc}")
-    return None
+    criteria, _, err = read_complete_score(score_path)
+    if criteria is None:
+        if err != "score file missing":
+            print(f"  WARNING: could not read existing criteria from {score_path.name}: {err}")
+        return None
+    return [c.name for c in criteria]
 
 
 async def score_all(
@@ -666,13 +672,9 @@ async def score_all(
             # Step 3: check existing qwen score for dimension reuse
             qwen_scored_names: list[str] | None = None
             qwen_score_path = config.resolve_score_path(task.id, "qwen")
-            if qwen_score_path.exists():
-                try:
-                    qc = read_quality_toml(qwen_score_path)
-                    if qc and all(c.score >= 1 and c.rationale for c in qc):
-                        qwen_scored_names = [c.name for c in qc]
-                except Exception:
-                    pass
+            qc, _, _ = read_complete_score(qwen_score_path)
+            if qc is not None:
+                qwen_scored_names = [c.name for c in qc]
 
             if not as_json:
                 print(f"\n[{task.id}]")

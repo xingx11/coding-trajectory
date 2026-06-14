@@ -11,8 +11,6 @@ from pathlib import Path
 
 from ctpipe.config import (
     MAX_TURNS,
-    MIN_CRITERIA_COUNT,
-    MAX_CRITERIA_COUNT,
     MIN_TRAJECTORY_LINES,
     MIN_TURNS,
     MODEL_SPECIFIC_STAGES,
@@ -36,12 +34,7 @@ from ctpipe.stats import (
     _find_slowest,
     _fmt_duration,
 )
-from ctpipe.toml_utils import (
-    calc_passrate,
-    is_complete_rubric,
-    is_unscored_template,
-    read_quality_toml,
-)
+from ctpipe.toml_utils import read_quality_toml, safe_calc_passrate
 from ctpipe.trajectory import find_delivery_trajectory, parse_trajectory
 
 _MODEL_AGNOSTIC_STAGES = ("prepare", "finalize", "validate")
@@ -134,7 +127,24 @@ def _detect_threshold_violations(
     state: PipelineState,
     task_ids: list[str],
 ) -> list[str]:
-    """Collect passrate threshold violations across all tasks."""
+    """Collect passrate threshold violations across all tasks.
+
+    Reads each task's ``finalize`` state entry and checks:
+
+    * qwen passrate >= ``THRESHOLD_QWEN_MAX``
+    * claude passrate <= ``THRESHOLD_CLAUDE_MIN``
+    * claude passrate <= qwen passrate
+    * relative gain <= ``THRESHOLD_RELATIVE_GAIN_MIN``
+
+    Tasks where neither model has a positive passrate are skipped.
+
+    Args:
+        state: Pipeline state store.
+        task_ids: Task IDs to check.
+
+    Returns:
+        Flat list of human-readable violation strings (empty when clean).
+    """
     violations: list[str] = []
     for tid in task_ids:
         info = state.get(tid, "finalize")
@@ -142,6 +152,8 @@ def _detect_threshold_violations(
         claude_pr = info.get("claude_passrate", 0.0)
         has_qwen = isinstance(qwen_pr, (int, float)) and qwen_pr > 0
         has_claude = isinstance(claude_pr, (int, float)) and claude_pr > 0
+        if not has_qwen and not has_claude:
+            continue
         qw = float(qwen_pr) if has_qwen else 0.0
         cl = float(claude_pr) if has_claude else 0.0
         violations.extend(check_passrate_thresholds(tid, qw, cl, has_qwen, has_claude))
@@ -410,7 +422,8 @@ def _print_health_report(data: dict, verbose: bool, models: list[str]) -> None:
         )
         print(
             f"    Claude > Qwen: {diff['positive']}   "
-            f"Claude ≤ Qwen: {diff['negative']}"
+            f"Claude = Qwen: {diff['tie']}   "
+            f"Claude < Qwen: {diff['negative']}"
         )
     else:
         print(f"\n  Passrate diff: N/A (fewer than 2 paired tasks)")
@@ -674,7 +687,7 @@ def health_check(
     permanently_failed = blockers["permanently_failed"]
 
     # 3. threshold_violations -------------------------------------------
-    threshold_violations = _hc_collect_threshold_violations(state, tids)
+    threshold_violations = _detect_threshold_violations(state, tids)
 
     # 4. integrity_issues (trajectory + scoring) ------------------------
     integrity_issues = _hc_collect_integrity_issues(
@@ -757,34 +770,8 @@ def _hc_build_stage_summary(
 
 
 # ---------------------------------------------------------------------------
-# threshold_violations (reuses check_passrate_thresholds)
-# ---------------------------------------------------------------------------
-
-def _hc_collect_threshold_violations(
-    state: PipelineState,
-    task_ids: list[str],
-) -> list[str]:
-    """Collect passrate threshold violations across all tasks."""
-    violations: list[str] = []
-    for tid in task_ids:
-        info = state.get(tid, "finalize")
-        qwen_pr = info.get("qwen_passrate", 0.0)
-        claude_pr = info.get("claude_passrate", 0.0)
-        has_qwen = isinstance(qwen_pr, (int, float)) and qwen_pr > 0
-        has_claude = isinstance(claude_pr, (int, float)) and claude_pr > 0
-        if not has_qwen and not has_claude:
-            continue
-        qw = float(qwen_pr) if has_qwen else 0.0
-        cl = float(claude_pr) if has_claude else 0.0
-        violations.extend(
-            check_passrate_thresholds(tid, qw, cl, has_qwen, has_claude),
-        )
-    return violations
-
-
-# ---------------------------------------------------------------------------
 # integrity_issues (trajectory + scoring, reuses parse_trajectory /
-#                   is_complete_rubric / read_quality_toml)
+#                   safe_calc_passrate / read_quality_toml)
 # ---------------------------------------------------------------------------
 
 def _hc_collect_integrity_issues(
@@ -859,7 +846,7 @@ def _hc_scoring_issues(
     task_ids: list[str],
     models: list[str],
 ) -> list[str]:
-    """Validate score rubric files via read_quality_toml + is_complete_rubric."""
+    """Validate score rubric files via safe_calc_passrate."""
     issues: list[str] = []
     parsed_criteria: dict[str, dict[str, list]] = {}
 
@@ -869,56 +856,23 @@ def _hc_scoring_issues(
             prefix = f"[{tid}/{model}]"
             score_path = config.resolve_score_path(tid, model)
 
-            if not score_path.exists():
+            pr_val, score_err = safe_calc_passrate(score_path)
+            if pr_val is None:
                 ss = state.get(tid, "score", model).get("status", "")
-                if ss == "done":
+                if not score_path.exists() and ss == "done":
                     issues.append(
                         f"{prefix} score file missing (score status=done)"
                     )
+                elif score_path.exists():
+                    issues.append(f"{prefix} {score_err}")
                 continue
 
-            try:
-                criteria = read_quality_toml(score_path)
-            except Exception as exc:
-                issues.append(f"{prefix} score file parse error: {exc}")
-                continue
-
-            if is_unscored_template(criteria):
-                issues.append(f"{prefix} still an unscored template")
-                continue
-
-            n = len(criteria)
-            if not (MIN_CRITERIA_COUNT <= n <= MAX_CRITERIA_COUNT):
-                issues.append(
-                    f"{prefix} wrong criteria count: {n} "
-                    f"(expected {MIN_CRITERIA_COUNT}-{MAX_CRITERIA_COUNT})"
-                )
-                continue
-
+            criteria = read_quality_toml(score_path)
             for i, c in enumerate(criteria, 1):
                 if not is_valid_criterion_name(c.name):
                     issues.append(
                         f"{prefix} criterion {i}: invalid name {c.name!r}"
                     )
-                if c.score < 1 or c.score > 5:
-                    issues.append(
-                        f"{prefix} criterion {i} ({c.name}): "
-                        f"score {c.score} out of range 1-5"
-                    )
-                if not c.rationale:
-                    issues.append(
-                        f"{prefix} criterion {i} ({c.name}): missing rationale"
-                    )
-
-            if not is_complete_rubric(criteria):
-                scored_n = sum(
-                    1 for c in criteria if c.score >= 1 and c.rationale
-                )
-                issues.append(
-                    f"{prefix} incomplete rubric: "
-                    f"{scored_n}/{n} criteria filled"
-                )
-                continue
 
             task_criteria[model] = criteria
 

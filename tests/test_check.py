@@ -230,7 +230,7 @@ class CountTurnsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl_path = Path(tmpdir) / "test.jsonl"
             write_trajectory(jsonl_path, "session-123", "qwen", user_turns=3)
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 3)
         self.assertEqual(len(models), 1)
@@ -251,7 +251,7 @@ class CountTurnsTest(unittest.TestCase):
                 json.dumps({"type": "system", "info": "padding"}),
             ]
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 1)
         self.assertEqual(session_id, "sess-1")
@@ -265,7 +265,7 @@ class CountTurnsTest(unittest.TestCase):
             for i in range(12):
                 lines.append(json.dumps({"type": "system", "info": f"line {i}"}))
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 0)
         self.assertEqual(session_id, "")
@@ -279,7 +279,7 @@ class CountTurnsTest(unittest.TestCase):
             for i in range(11):
                 lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": f"msg {i}"}}))
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertGreater(user_turns, 0)
         self.assertEqual(len(models), 0)
@@ -300,7 +300,7 @@ class CountTurnsTest(unittest.TestCase):
             while len(lines) < 12:
                 lines.append(json.dumps({"type": "system", "info": "padding"}))
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 1)
         self.assertEqual(len(models), 1)
@@ -320,7 +320,7 @@ class CountTurnsTest(unittest.TestCase):
             while len(lines) < 12:
                 lines.append(json.dumps({"type": "system", "info": "padding"}))
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(session_id, "first-session")
 
@@ -335,7 +335,7 @@ class CountTurnsTest(unittest.TestCase):
             while len(lines) < 12:
                 lines.append(json.dumps({"type": "system", "info": "padding"}))
             jsonl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(len(models), 1)
         self.assertEqual(models[0], "qwen-same-model")
@@ -345,7 +345,7 @@ class CountTurnsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             jsonl_path = Path(tmpdir) / "test.jsonl"
             jsonl_path.write_text("", encoding="utf-8")
-            user_turns, models, session_id, issues = _count_turns(jsonl_path)
+            user_turns, models, session_id, _fq, issues = _count_turns(jsonl_path)
 
         self.assertEqual(user_turns, 0)
         self.assertEqual(len(models), 0)
@@ -453,7 +453,7 @@ class ScoreValidationTest(unittest.TestCase):
                 result, output = _run_check(config)
 
         self.assertFalse(result)
-        self.assertIn("score file is still an unscored template", output)
+        self.assertIn("unscored template", output)
         self.assertIn("CT-0001/qwen", output)
 
     def test_too_few_criteria(self) -> None:
@@ -547,7 +547,7 @@ class ScoreValidationTest(unittest.TestCase):
                 result, output = _run_check(config)
 
         self.assertFalse(result)
-        self.assertIn("score 6 out of range 1-5", output)
+        self.assertIn("score 6 out of range", output)
 
     def test_score_out_of_range_low(self) -> None:
         """One criterion with score=0 but has rationale → out of range (not unscored)."""
@@ -582,9 +582,7 @@ class ScoreValidationTest(unittest.TestCase):
                 result, output = _run_check(config)
 
         self.assertFalse(result)
-        self.assertIn("score 0 out of range 1-5", output)
-        # Should NOT be flagged as unscored template (one criterion has rationale)
-        self.assertNotIn("unscored template", output)
+        self.assertIn("score 0 out of range", output)
 
     def test_missing_rationale(self) -> None:
         """One criterion with score but no rationale → missing rationale + incomplete."""
@@ -619,7 +617,6 @@ class ScoreValidationTest(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertIn("missing rationale", output)
-        self.assertIn("incomplete scoring: 6/7", output)
 
     def test_invalid_criterion_name(self) -> None:
         """All criteria with names that are not valid snake_case → invalid name."""

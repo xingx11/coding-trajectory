@@ -186,7 +186,7 @@ def _build_metadata_content(task: TaskConfig, commit_hash: str = "") -> str:
 - Initial prompt:
 
 ```text
-{task.prompt_qwen}
+{task.prompt}
 ```
 
 - Follow-up summary:
@@ -204,7 +204,7 @@ def _build_metadata_content(task: TaskConfig, commit_hash: str = "") -> str:
 - Initial prompt:
 
 ```text
-{task.prompt_claude}
+{task.prompt}
 ```
 
 - Follow-up summary:
